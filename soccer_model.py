@@ -59,12 +59,37 @@ def get_scheduled_matches(competition_code, limit_days=7):
 
 
 RECENCY_DECAY = 0.93  # each game back in time counts ~7% less than the one after it
+PRIOR_STRENGTH = 4.0  # pseudo-matches of league-average form mixed into every team's rate.
+                      # Regularizes small samples: a team with a single clean sheet can no longer
+                      # produce a 0.0 rating, and one 6-0 blowout can't blow a rate up unboundedly.
 
 
-def build_team_stats(matches):
-    """Compute recency-weighted average goals scored/conceded home & away per team,
-    plus league-wide averages. A team's most recent matches count more than ones
-    from earlier in the season (exponential decay by recency rank)."""
+def _shrunk_weighted_rates(games, prior_for, prior_against):
+    """Recency-weighted goals for/against, shrunk toward the league prior with PRIOR_STRENGTH
+    pseudo-matches. games: list of (date, goals_for, goals_against). Returns (gf_rate, ga_rate),
+    both strictly positive so they can never zero out an opponent's expected goals."""
+    if not games:
+        return prior_for, prior_against
+    games_sorted = sorted(games, key=lambda g: g[0], reverse=True)
+    weight_sum = gf_sum = ga_sum = 0.0
+    for i, (_, gf, ga) in enumerate(games_sorted):
+        w = RECENCY_DECAY ** i
+        weight_sum += w
+        gf_sum += w * gf
+        ga_sum += w * ga
+    gf_rate = (gf_sum + PRIOR_STRENGTH * prior_for) / (weight_sum + PRIOR_STRENGTH)
+    ga_rate = (ga_sum + PRIOR_STRENGTH * prior_against) / (weight_sum + PRIOR_STRENGTH)
+    return gf_rate, ga_rate
+
+
+def build_team_stats(matches, pooled=False):
+    """Compute recency-weighted, shrinkage-regularized attack/defense ratings per team.
+
+    pooled=False (club leagues): split home and away form, since home advantage is real and
+    samples are large (~19 home + 19 away over a season).
+    pooled=True (national-team tournaments): combine home and away into one rating set, because
+    World Cup / Euro venues are effectively neutral and per-side samples are tiny (1-2 games).
+    """
     home_matches = {}  # team -> list of (date, goals_for, goals_against)
     away_matches = {}
 
@@ -93,19 +118,7 @@ def build_team_stats(matches):
 
     league_avg_home_goals = total_home_goals / total_games
     league_avg_away_goals = total_away_goals / total_games
-
-    def weighted_rates(games):
-        """games: list of (date, goals_for, goals_against), most recent gets the highest weight."""
-        games_sorted = sorted(games, key=lambda g: g[0], reverse=True)
-        weight_sum = goals_for_sum = goals_against_sum = 0.0
-        for i, (_, gf, ga) in enumerate(games_sorted):
-            w = RECENCY_DECAY ** i
-            weight_sum += w
-            goals_for_sum += w * gf
-            goals_against_sum += w * ga
-        if weight_sum == 0:
-            return None
-        return goals_for_sum / weight_sum, goals_against_sum / weight_sum
+    league_avg_goals = (total_home_goals + total_away_goals) / (2 * total_games)  # per team, per game
 
     teams = set(list(home_matches.keys()) + list(away_matches.keys()))
     stats = {}
@@ -113,13 +126,21 @@ def build_team_stats(matches):
         h_games = home_matches.get(team, [])
         a_games = away_matches.get(team, [])
 
-        h_rates = weighted_rates(h_games)
-        a_rates = weighted_rates(a_games)
-
-        home_attack = (h_rates[0] / league_avg_home_goals) if h_rates else 1.0
-        home_defense = (h_rates[1] / league_avg_away_goals) if h_rates else 1.0
-        away_attack = (a_rates[0] / league_avg_away_goals) if a_rates else 1.0
-        away_defense = (a_rates[1] / league_avg_home_goals) if a_rates else 1.0
+        if pooled:
+            # One rating from all matches, evaluated against the overall (neutral) league average.
+            all_games = h_games + a_games
+            gf, ga = _shrunk_weighted_rates(all_games, league_avg_goals, league_avg_goals)
+            attack = gf / league_avg_goals
+            defense = ga / league_avg_goals
+            home_attack = away_attack = attack
+            home_defense = away_defense = defense
+        else:
+            h_gf, h_ga = _shrunk_weighted_rates(h_games, league_avg_home_goals, league_avg_away_goals)
+            a_gf, a_ga = _shrunk_weighted_rates(a_games, league_avg_away_goals, league_avg_home_goals)
+            home_attack = h_gf / league_avg_home_goals
+            home_defense = h_ga / league_avg_away_goals
+            away_attack = a_gf / league_avg_away_goals
+            away_defense = a_ga / league_avg_home_goals
 
         stats[team] = {
             "home_attack": home_attack,
@@ -265,13 +286,18 @@ def format_match_probabilities(competition_name, home_team, away_team, probs, ki
 
 def scan_competition(competition_code, competition_name):
     """Returns list of (probs, message, kickoff_iso, match_id) for upcoming matches in this competition."""
+    national = competition_code in NATIONAL_TEAM_COMPETITIONS
     finished = get_finished_matches(competition_code)
-    league_stats = build_team_stats(finished)
+    league_stats = build_team_stats(finished, pooled=national)
     if not league_stats:
         return []
 
-    min_games = 2 if competition_code in NATIONAL_TEAM_COMPETITIONS else 6
-    sample_note = " Based on a small early-tournament sample." if competition_code in NATIONAL_TEAM_COMPETITIONS else ""
+    min_games = 2 if national else 6
+    sample_note = (
+        " Based on a small early-tournament sample (heavily regularized toward the field average, "
+        "so probabilities stay deliberately cautious until more matches are played)."
+        if national else ""
+    )
 
     upcoming = get_scheduled_matches(competition_code)
     results = []
