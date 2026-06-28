@@ -58,14 +58,15 @@ def get_scheduled_matches(competition_code, limit_days=7):
     return data.get("matches", [])[:30]
 
 
+RECENCY_DECAY = 0.93  # each game back in time counts ~7% less than the one after it
+
+
 def build_team_stats(matches):
-    """Compute average goals scored/conceded home & away per team, plus league-wide averages."""
-    home_goals_for = {}
-    home_goals_against = {}
-    home_games = {}
-    away_goals_for = {}
-    away_goals_against = {}
-    away_games = {}
+    """Compute recency-weighted average goals scored/conceded home & away per team,
+    plus league-wide averages. A team's most recent matches count more than ones
+    from earlier in the season (exponential decay by recency rank)."""
+    home_matches = {}  # team -> list of (date, goals_for, goals_against)
+    away_matches = {}
 
     total_home_goals = 0
     total_away_goals = 0
@@ -78,14 +79,10 @@ def build_team_stats(matches):
             continue
         home = m["homeTeam"]["name"]
         away = m["awayTeam"]["name"]
+        date = m.get("utcDate", "")
 
-        home_goals_for[home] = home_goals_for.get(home, 0) + hg
-        home_goals_against[home] = home_goals_against.get(home, 0) + ag
-        home_games[home] = home_games.get(home, 0) + 1
-
-        away_goals_for[away] = away_goals_for.get(away, 0) + ag
-        away_goals_against[away] = away_goals_against.get(away, 0) + hg
-        away_games[away] = away_games.get(away, 0) + 1
+        home_matches.setdefault(home, []).append((date, hg, ag))
+        away_matches.setdefault(away, []).append((date, ag, hg))
 
         total_home_goals += hg
         total_away_goals += ag
@@ -97,21 +94,39 @@ def build_team_stats(matches):
     league_avg_home_goals = total_home_goals / total_games
     league_avg_away_goals = total_away_goals / total_games
 
-    teams = set(list(home_games.keys()) + list(away_games.keys()))
+    def weighted_rates(games):
+        """games: list of (date, goals_for, goals_against), most recent gets the highest weight."""
+        games_sorted = sorted(games, key=lambda g: g[0], reverse=True)
+        weight_sum = goals_for_sum = goals_against_sum = 0.0
+        for i, (_, gf, ga) in enumerate(games_sorted):
+            w = RECENCY_DECAY ** i
+            weight_sum += w
+            goals_for_sum += w * gf
+            goals_against_sum += w * ga
+        if weight_sum == 0:
+            return None
+        return goals_for_sum / weight_sum, goals_against_sum / weight_sum
+
+    teams = set(list(home_matches.keys()) + list(away_matches.keys()))
     stats = {}
     for team in teams:
-        hg_games = home_games.get(team, 0)
-        ag_games = away_games.get(team, 0)
-        home_attack = (home_goals_for.get(team, 0) / hg_games / league_avg_home_goals) if hg_games else 1.0
-        home_defense = (home_goals_against.get(team, 0) / hg_games / league_avg_away_goals) if hg_games else 1.0
-        away_attack = (away_goals_for.get(team, 0) / ag_games / league_avg_away_goals) if ag_games else 1.0
-        away_defense = (away_goals_against.get(team, 0) / ag_games / league_avg_home_goals) if ag_games else 1.0
+        h_games = home_matches.get(team, [])
+        a_games = away_matches.get(team, [])
+
+        h_rates = weighted_rates(h_games)
+        a_rates = weighted_rates(a_games)
+
+        home_attack = (h_rates[0] / league_avg_home_goals) if h_rates else 1.0
+        home_defense = (h_rates[1] / league_avg_away_goals) if h_rates else 1.0
+        away_attack = (a_rates[0] / league_avg_away_goals) if a_rates else 1.0
+        away_defense = (a_rates[1] / league_avg_home_goals) if a_rates else 1.0
+
         stats[team] = {
             "home_attack": home_attack,
             "home_defense": home_defense,
             "away_attack": away_attack,
             "away_defense": away_defense,
-            "games": hg_games + ag_games,
+            "games": len(h_games) + len(a_games),
         }
 
     return {
