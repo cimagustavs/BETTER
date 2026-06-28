@@ -15,6 +15,13 @@ GOLD_WEBHOOK = os.environ["GOLD_WEBHOOK"]
 
 soccer_model.FD_API_KEY = os.environ["FOOTBALL_DATA_API_KEY"]
 
+# Per-competition channel webhooks (optional — only routed if the env var is set).
+COMPETITION_WEBHOOKS = {
+    code: os.environ[f"COMP_{code}_WEBHOOK"]
+    for code in ("PL", "PD", "SA", "BL1", "FL1", "CL", "WC")
+    if os.environ.get(f"COMP_{code}_WEBHOOK")
+}
+
 SPORTS = [
     "soccer_epl",
     "soccer_spain_la_liga",
@@ -221,6 +228,13 @@ def run_soccer_scan():
                 continue
 
             top_prob = max(probs["home_win"], probs["draw"], probs["away_win"])
+
+            # Always post into the competition's own channel so each league channel stays active.
+            comp_webhook = COMPETITION_WEBHOOKS.get(code)
+            if comp_webhook:
+                post_to_discord(comp_webhook, msg)
+
+            # Tiered VIP routing by model confidence.
             post_to_discord(FREE_WEBHOOK, msg)
             if top_prob >= 0.45:
                 post_to_discord(SILVER_WEBHOOK, msg)
