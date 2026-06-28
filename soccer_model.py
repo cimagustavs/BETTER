@@ -156,6 +156,27 @@ def match_probabilities(league_stats, home_team, away_team, min_games=6):
     total = home_win + draw + away_win
     if total == 0:
         return None
+
+    # Exact scorelines: same independent-Poisson grid, just kept per-cell instead of collapsed to W/D/L.
+    scoreline_probs = {}
+    for hg in range(MAX_GOALS + 1):
+        for ag in range(MAX_GOALS + 1):
+            scoreline_probs[(hg, ag)] = poisson_pmf(hg, exp_home_goals) * poisson_pmf(ag, exp_away_goals)
+    top_scorelines = sorted(scoreline_probs.items(), key=lambda x: -x[1])[:3]
+
+    # Total goals = sum of two independent Poisson variables -> itself Poisson(lambda_home + lambda_away).
+    total_lambda = exp_home_goals + exp_away_goals
+    over_under = {}
+    for line in (1.5, 2.5, 3.5):
+        threshold = int(line) + 1  # over 2.5 means >=3 goals
+        p_under = sum(poisson_pmf(k, total_lambda) for k in range(threshold))
+        over_under[line] = {"over": 1 - p_under, "under": p_under}
+
+    # BTTS: independent home/away scoring, so P(both score) = (1 - P(home=0)) * (1 - P(away=0)).
+    p_home_scores = 1 - poisson_pmf(0, exp_home_goals)
+    p_away_scores = 1 - poisson_pmf(0, exp_away_goals)
+    btts_yes = p_home_scores * p_away_scores
+
     return {
         "home_win": home_win / total,
         "draw": draw / total,
@@ -168,6 +189,9 @@ def match_probabilities(league_stats, home_team, away_team, min_games=6):
         "away_defense": away["away_defense"],
         "home_games": home["games"],
         "away_games": away["games"],
+        "top_scorelines": [(score, p / total) for score, p in top_scorelines],
+        "over_under": over_under,
+        "btts_yes": btts_yes,
     }
 
 
@@ -194,6 +218,15 @@ def format_match_probabilities(competition_name, home_team, away_team, probs, ki
     away_attack_phrase = _rating_phrase(probs["away_attack"], "attack")
     away_defense_phrase = _rating_phrase(probs["away_defense"], "defense")
 
+    scorelines_str = ", ".join(
+        f"{hg}-{ag} ({p*100:.1f}%)" for (hg, ag), p in probs["top_scorelines"]
+    )
+    ou = probs["over_under"]
+    ou_str = "  |  ".join(
+        f"O/U {line}: {ou[line]['over']*100:.1f}% over / {ou[line]['under']*100:.1f}% under"
+        for line in sorted(ou.keys())
+    )
+
     return (
         f"**[{competition_name}] {home_team} vs {away_team}**\n"
         f"  Kickoff: {kickoff}\n"
@@ -201,12 +234,16 @@ def format_match_probabilities(competition_name, home_team, away_team, probs, ki
         f"  • Draw: {probs['draw']*100:.1f}%\n"
         f"  • {away_team} win: {probs['away_win']*100:.1f}%\n"
         f"  Expected score: {probs['exp_home_goals']:.1f} - {probs['exp_away_goals']:.1f}\n"
+        f"  Most likely scorelines: {scorelines_str}\n"
+        f"  {ou_str}\n"
+        f"  Both teams to score: {probs['btts_yes']*100:.1f}% yes / {(1-probs['btts_yes'])*100:.1f}% no\n"
         f"\n"
         f"  **Why:** (sample: {home_team} {probs['home_games']} games, {away_team} {probs['away_games']} games)\n"
         f"  • {home_team} at home: {home_attack_phrase}; {home_defense_phrase}.\n"
         f"  • {away_team} away: {away_attack_phrase}; {away_defense_phrase}.\n"
         f"  • Expected goals come from multiplying each team's scoring rate by the opponent's conceding rate, "
-        f"relative to the league's average home/away goal totals.\n"
+        f"relative to the league's average home/away goal totals. Scorelines, over/under, and BTTS are all "
+        f"derived from that same expected-goals estimate.\n"
         f"  _Poisson model from each team's actual goals scored/conceded.{sample_note} Statistical estimate, not a guaranteed outcome._"
     )
 
