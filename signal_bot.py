@@ -14,20 +14,16 @@ SILVER_WEBHOOK = os.environ["SILVER_WEBHOOK"]
 GOLD_WEBHOOK = os.environ["GOLD_WEBHOOK"]
 
 soccer_model.FD_API_KEY = os.environ["FOOTBALL_DATA_API_KEY"]
-SOCCER_DIGEST_INTERVAL_SECONDS = 12 * 3600  # football-data free tier is rate-limited; twice a day is plenty
 
 SPORTS = ["americanfootball_nfl", "basketball_nba", "baseball_mlb", "icehockey_nhl", "soccer_epl"]
 REGIONS = "us"
 MARKETS = "h2h"
 EV_THRESHOLD = 0.03  # 3% min edge to post a value bet
 SCAN_INTERVAL_SECONDS = 1800  # 30 minutes
-DAILY_DIGEST_INTERVAL_SECONDS = 24 * 3600
 
 SHARP_BOOKS = {"pinnacle", "betonlineag", "lowvig"}
 
 posted_signals = set()
-last_digest_at = 0
-last_soccer_digest_at = 0
 
 
 def fetch_odds(sport):
@@ -118,33 +114,6 @@ def find_value_bets(event):
     return signals
 
 
-def fair_probabilities(event):
-    """Average no-vig fair probability per outcome across all books offering h2h."""
-    sums = {}
-    counts = {}
-    for bookmaker in event.get("bookmakers", []):
-        for market in bookmaker.get("markets", []):
-            if market["key"] != "h2h":
-                continue
-            raw_probs = [implied_prob(o["price"]) for o in market["outcomes"]]
-            fair_probs = no_vig_fair_prob(raw_probs)
-            for outcome, fair_p in zip(market["outcomes"], fair_probs):
-                sums[outcome["name"]] = sums.get(outcome["name"], 0) + fair_p
-                counts[outcome["name"]] = counts.get(outcome["name"], 0) + 1
-    if not sums:
-        return None
-    return {name: sums[name] / counts[name] for name in sums}
-
-
-def format_percentages(event, probs):
-    home = event.get("home_team", "")
-    away = event.get("away_team", "")
-    lines = [f"**{away} @ {home}**"]
-    for name, p in sorted(probs.items(), key=lambda x: -x[1]):
-        lines.append(f"  • {name}: {p*100:.1f}% fair win probability")
-    return "\n".join(lines)
-
-
 def post_to_discord(webhook_url, content):
     for attempt in range(3):
         resp = requests.post(webhook_url, json={"content": content}, timeout=10)
@@ -208,75 +177,64 @@ def run_scan():
         time.sleep(1)
 
 
-def run_daily_digest():
-    """Post fair win-probability breakdown for every match today, to Free/Silver/Gold."""
-    header = f"**Daily Fair-Probability Digest — {datetime.now(timezone.utc).strftime('%Y-%m-%d')}**\n_Derived mathematically from live no-vig odds across books. Not a prediction of outcome._\n"
-    post_to_discord(FREE_WEBHOOK, header)
-    post_to_discord(SILVER_WEBHOOK, header)
-    post_to_discord(GOLD_WEBHOOK, header)
+SOCCER_LEAD_TIME_SECONDS = 2 * 3600  # send each match's signal ~2h before kickoff
+SOCCER_LEAD_WINDOW_SECONDS = 35 * 60  # catch window per scan cycle (must exceed SCAN_INTERVAL_SECONDS)
 
-    for sport in SPORTS:
-        events = fetch_odds(sport)
-        for event in events:
-            probs = fair_probabilities(event)
-            if not probs:
-                continue
-            msg = format_percentages(event, probs)
-            post_to_discord(FREE_WEBHOOK, msg)
-            post_to_discord(SILVER_WEBHOOK, msg)
-            post_to_discord(GOLD_WEBHOOK, msg)
-        time.sleep(1)
+posted_soccer_matches = set()
 
 
-def run_soccer_digest():
+def run_soccer_scan():
     """Primary signal: Poisson-model win/draw/loss probabilities for upcoming soccer matches,
-    built from each team's actual historical goals scored/conceded. Routed by how lopsided the
-    model's probability spread is (a statistical confidence proxy, not a prediction of outcome)."""
-    header = (
-        f"**Soccer Match Probabilities — {datetime.now(timezone.utc).strftime('%Y-%m-%d')}**\n"
-        f"_Poisson model from real historical results (goals scored/conceded, home/away splits). "
-        f"Statistical estimate only — not a guaranteed outcome._\n"
-    )
-    posted_any = False
+    built from each team's actual historical goals scored/conceded. Each match is posted once,
+    individually, roughly 2 hours before its kickoff — not all at once. Routed by how lopsided
+    the model's probability spread is (a statistical confidence proxy, not a prediction)."""
+    from datetime import datetime as _dt
+
+    now = datetime.now(timezone.utc)
+
     for code, name in soccer_model.COMPETITIONS.items():
         try:
             results = soccer_model.scan_competition(code, name)
         except Exception as e:
             print(f"Soccer scan failed for {name}: {e}")
             continue
-        for probs, msg in results:
-            top_prob = max(probs["home_win"], probs["draw"], probs["away_win"])
-            if not posted_any:
-                post_to_discord(FREE_WEBHOOK, header)
-                post_to_discord(SILVER_WEBHOOK, header)
-                post_to_discord(GOLD_WEBHOOK, header)
-                posted_any = True
 
+        for probs, msg, kickoff_iso, match_id in results:
+            if match_id in posted_soccer_matches:
+                continue
+            try:
+                kickoff_dt = _dt.fromisoformat(kickoff_iso.replace("Z", "+00:00"))
+            except (ValueError, AttributeError):
+                continue
+
+            seconds_to_kickoff = (kickoff_dt - now).total_seconds()
+            target = SOCCER_LEAD_TIME_SECONDS
+            if not (target - SOCCER_LEAD_WINDOW_SECONDS <= seconds_to_kickoff <= target):
+                continue
+
+            top_prob = max(probs["home_win"], probs["draw"], probs["away_win"])
             post_to_discord(FREE_WEBHOOK, msg)
             if top_prob >= 0.45:
                 post_to_discord(SILVER_WEBHOOK, msg)
             if top_prob >= 0.55:
                 post_to_discord(GOLD_WEBHOOK, msg)
+            posted_soccer_matches.add(match_id)
+
         time.sleep(2)
 
 
 def main():
-    global last_digest_at, last_soccer_digest_at
     print(f"Signal bot starting at {datetime.now(timezone.utc).isoformat()}")
     while True:
         try:
             run_scan()
-            now = time.time()
-            if now - last_digest_at >= DAILY_DIGEST_INTERVAL_SECONDS:
-                run_daily_digest()
-                last_digest_at = now
-            if now - last_soccer_digest_at >= SOCCER_DIGEST_INTERVAL_SECONDS:
-                run_soccer_digest()
-                last_soccer_digest_at = now
+            run_soccer_scan()
         except Exception as e:
             print(f"Scan error: {e}")
         if len(posted_signals) > 5000:
             posted_signals.clear()
+        if len(posted_soccer_matches) > 5000:
+            posted_soccer_matches.clear()
         time.sleep(SCAN_INTERVAL_SECONDS)
 
 

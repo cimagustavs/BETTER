@@ -162,10 +162,38 @@ def match_probabilities(league_stats, home_team, away_team, min_games=6):
         "away_win": away_win / total,
         "exp_home_goals": exp_home_goals,
         "exp_away_goals": exp_away_goals,
+        "home_attack": home["home_attack"],
+        "home_defense": home["home_defense"],
+        "away_attack": away["away_attack"],
+        "away_defense": away["away_defense"],
+        "home_games": home["games"],
+        "away_games": away["games"],
     }
 
 
+def _rating_phrase(value, kind):
+    """kind is 'attack' or 'defense'. For defense, lower value = better (concedes less)."""
+    pct = (value - 1.0) * 100
+    if kind == "attack":
+        if pct >= 5:
+            return f"scores {pct:.0f}% more than the league average"
+        elif pct <= -5:
+            return f"scores {abs(pct):.0f}% less than the league average"
+        return "scores about league-average"
+    else:
+        if pct >= 5:
+            return f"concedes {pct:.0f}% more than the league average (weaker defense)"
+        elif pct <= -5:
+            return f"concedes {abs(pct):.0f}% less than the league average (stronger defense)"
+        return "concedes about league-average"
+
+
 def format_match_probabilities(competition_name, home_team, away_team, probs, kickoff, sample_note=""):
+    home_attack_phrase = _rating_phrase(probs["home_attack"], "attack")
+    home_defense_phrase = _rating_phrase(probs["home_defense"], "defense")
+    away_attack_phrase = _rating_phrase(probs["away_attack"], "attack")
+    away_defense_phrase = _rating_phrase(probs["away_defense"], "defense")
+
     return (
         f"**[{competition_name}] {home_team} vs {away_team}**\n"
         f"  Kickoff: {kickoff}\n"
@@ -173,12 +201,18 @@ def format_match_probabilities(competition_name, home_team, away_team, probs, ki
         f"  • Draw: {probs['draw']*100:.1f}%\n"
         f"  • {away_team} win: {probs['away_win']*100:.1f}%\n"
         f"  Expected score: {probs['exp_home_goals']:.1f} - {probs['exp_away_goals']:.1f}\n"
+        f"\n"
+        f"  **Why:** (sample: {home_team} {probs['home_games']} games, {away_team} {probs['away_games']} games)\n"
+        f"  • {home_team} at home: {home_attack_phrase}; {home_defense_phrase}.\n"
+        f"  • {away_team} away: {away_attack_phrase}; {away_defense_phrase}.\n"
+        f"  • Expected goals come from multiplying each team's scoring rate by the opponent's conceding rate, "
+        f"relative to the league's average home/away goal totals.\n"
         f"  _Poisson model from each team's actual goals scored/conceded.{sample_note} Statistical estimate, not a guaranteed outcome._"
     )
 
 
 def scan_competition(competition_code, competition_name):
-    """Returns list of formatted message strings for upcoming matches in this competition."""
+    """Returns list of (probs, message, kickoff_iso, match_id) for upcoming matches in this competition."""
     finished = get_finished_matches(competition_code)
     league_stats = build_team_stats(finished)
     if not league_stats:
@@ -188,7 +222,7 @@ def scan_competition(competition_code, competition_name):
     sample_note = " Based on a small early-tournament sample." if competition_code in NATIONAL_TEAM_COMPETITIONS else ""
 
     upcoming = get_scheduled_matches(competition_code)
-    messages = []
+    results = []
     for m in upcoming:
         home_team = m["homeTeam"]["name"]
         away_team = m["awayTeam"]["name"]
@@ -196,5 +230,6 @@ def scan_competition(competition_code, competition_name):
         if not probs:
             continue
         kickoff = m.get("utcDate", "TBD")
-        messages.append((probs, format_match_probabilities(competition_name, home_team, away_team, probs, kickoff, sample_note)))
-    return messages
+        msg = format_match_probabilities(competition_name, home_team, away_team, probs, kickoff, sample_note)
+        results.append((probs, msg, kickoff, m["id"]))
+    return results
