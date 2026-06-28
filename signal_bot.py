@@ -192,8 +192,7 @@ def run_scan():
         time.sleep(1)
 
 
-SOCCER_LEAD_TIME_SECONDS = 2 * 3600  # send each match's signal ~2h before kickoff
-SOCCER_LEAD_WINDOW_SECONDS = 35 * 60  # catch window per scan cycle (must exceed SCAN_INTERVAL_SECONDS)
+SOCCER_LEAD_TIME_SECONDS = 2 * 3600  # start posting a match once it's within ~2h of kickoff
 
 posted_soccer_matches = set()
 
@@ -223,8 +222,11 @@ def run_soccer_scan():
                 continue
 
             seconds_to_kickoff = (kickoff_dt - now).total_seconds()
-            target = SOCCER_LEAD_TIME_SECONDS
-            if not (target - SOCCER_LEAD_WINDOW_SECONDS <= seconds_to_kickoff <= target):
+            # Post once a match comes within the lead time and hasn't kicked off yet.
+            # Dedup (posted_soccer_matches) guarantees it's still posted only once, and this is
+            # robust to scan-timing drift: a match is caught on the first scan after it crosses
+            # the 2h mark instead of needing a scan to land inside a narrow window.
+            if seconds_to_kickoff <= 0 or seconds_to_kickoff > SOCCER_LEAD_TIME_SECONDS:
                 continue
 
             top_prob = max(probs["home_win"], probs["draw"], probs["away_win"])
