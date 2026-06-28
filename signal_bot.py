@@ -15,7 +15,15 @@ GOLD_WEBHOOK = os.environ["GOLD_WEBHOOK"]
 
 soccer_model.FD_API_KEY = os.environ["FOOTBALL_DATA_API_KEY"]
 
-SPORTS = ["americanfootball_nfl", "basketball_nba", "baseball_mlb", "icehockey_nhl", "soccer_epl"]
+SPORTS = [
+    "soccer_epl",
+    "soccer_spain_la_liga",
+    "soccer_italy_serie_a",
+    "soccer_germany_bundesliga",
+    "soccer_france_ligue_one",
+    "soccer_uefa_champs_league",
+    "soccer_fifa_world_cup",
+]
 REGIONS = "us"
 MARKETS = "h2h"
 EV_THRESHOLD = 0.03  # 3% min edge to post a value bet
