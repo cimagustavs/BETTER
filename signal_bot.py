@@ -129,9 +129,14 @@ def find_value_bets(event):
     return signals
 
 
-def post_to_discord(webhook_url, content):
+def post_to_discord(webhook_url, content=None, embed=None):
+    payload = {}
+    if content is not None:
+        payload["content"] = content
+    if embed is not None:
+        payload["embeds"] = [embed]
     for attempt in range(3):
-        resp = requests.post(webhook_url, json={"content": content}, timeout=10)
+        resp = requests.post(webhook_url, json=payload, timeout=10)
         if resp.status_code in (200, 204):
             return
         if resp.status_code == 429:
@@ -140,7 +145,7 @@ def post_to_discord(webhook_url, content):
             continue
         print(f"Discord post failed: {resp.status_code} {resp.text[:200]}")
         return
-    print(f"Discord post gave up after rate limiting: {content[:60]}")
+    print("Discord post gave up after rate limiting")
 
 
 def format_arbitrage(event, arb):
@@ -213,7 +218,7 @@ def run_soccer_scan():
             print(f"Soccer scan failed for {name}: {e}")
             continue
 
-        for probs, msg, kickoff_iso, match_id in results:
+        for probs, embed, kickoff_iso, match_id in results:
             if match_id in posted_soccer_matches:
                 continue
             try:
@@ -234,14 +239,14 @@ def run_soccer_scan():
             # Always post into the competition's own channel so each league channel stays active.
             comp_webhook = COMPETITION_WEBHOOKS.get(code)
             if comp_webhook:
-                post_to_discord(comp_webhook, msg)
+                post_to_discord(comp_webhook, embed=embed)
 
             # Tiered VIP routing by model confidence.
-            post_to_discord(FREE_WEBHOOK, msg)
+            post_to_discord(FREE_WEBHOOK, embed=embed)
             if top_prob >= 0.45:
-                post_to_discord(SILVER_WEBHOOK, msg)
+                post_to_discord(SILVER_WEBHOOK, embed=embed)
             if top_prob >= 0.55:
-                post_to_discord(GOLD_WEBHOOK, msg)
+                post_to_discord(GOLD_WEBHOOK, embed=embed)
             posted_soccer_matches.add(match_id)
 
         time.sleep(2)

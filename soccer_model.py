@@ -325,8 +325,84 @@ def format_match_probabilities(competition_name, home_team, away_team, probs, ki
     )
 
 
+def _confidence_color(top_prob):
+    """Accent color by how strong the model's lean is: green = strong, blue = moderate, grey = toss-up."""
+    if top_prob >= 0.55:
+        return 0x2ECC71  # green
+    if top_prob >= 0.45:
+        return 0x3498DB  # blue
+    return 0x95A5A6      # grey
+
+
+def format_match_embed(competition_name, home_team, away_team, probs, kickoff,
+                       sample_note="", neutral=False, emblem_url=None):
+    """Build a rich Discord embed (color-coded, structured fields, competition emblem) for a match."""
+    home_ctx = "overall" if neutral else "at home"
+    away_ctx = "overall" if neutral else "away"
+
+    hw, dr, aw = probs["home_win"], probs["draw"], probs["away_win"]
+    top_prob = max(hw, dr, aw)
+    tip_label, tip_prob, tip_fair = strongest_tip(probs, home_team, away_team)
+    ou = probs["over_under"]
+
+    # Discord auto-localizes <t:unix:F> to each viewer's own timezone.
+    kickoff_line = kickoff
+    try:
+        from datetime import datetime as _dt
+        ts = int(_dt.fromisoformat(kickoff.replace("Z", "+00:00")).timestamp())
+        kickoff_line = f"<t:{ts}:F>  (<t:{ts}:R>)"
+    except (ValueError, AttributeError):
+        pass
+
+    result_field = (
+        f"🏠 **{home_team}**  `{hw*100:.1f}%`\n"
+        f"🤝 Draw  `{dr*100:.1f}%`\n"
+        f"🛫 **{away_team}**  `{aw*100:.1f}%`"
+    )
+    goals_field = (
+        f"Over 1.5  `{ou[1.5]['over']*100:.0f}%`\n"
+        f"Over 2.5  `{ou[2.5]['over']*100:.0f}%`\n"
+        f"Over 3.5  `{ou[3.5]['over']*100:.0f}%`\n"
+        f"BTTS  `{probs['btts_yes']*100:.0f}% yes`"
+    )
+    scores_field = "\n".join(f"`{hg}-{ag}`  {p*100:.1f}%" for (hg, ag), p in probs["top_scorelines"])
+
+    why_field = (
+        f"_Sample: {home_team} {probs['home_games']} games, {away_team} {probs['away_games']} games_\n"
+        f"• **{home_team}** {home_ctx}: {_rating_phrase(probs['home_attack'],'attack')}; "
+        f"{_rating_phrase(probs['home_defense'],'defense')}.\n"
+        f"• **{away_team}** {away_ctx}: {_rating_phrase(probs['away_attack'],'attack')}; "
+        f"{_rating_phrase(probs['away_defense'],'defense')}."
+    )
+    tip_field = (
+        f"➡️ **{tip_label}**\n"
+        f"Model probability `{tip_prob*100:.1f}%`  •  Fair odds `{tip_fair:.2f}`\n"
+        f"_Only worth backing if a book prices it above {tip_fair:.2f}._"
+    )
+
+    embed = {
+        "title": f"⚽ {home_team}  vs  {away_team}",
+        "description": f"🕐 Kickoff: {kickoff_line}\n📐 Expected score: **{probs['exp_home_goals']:.1f} – {probs['exp_away_goals']:.1f}**",
+        "color": _confidence_color(top_prob),
+        "author": {"name": competition_name},
+        "fields": [
+            {"name": "📊 Match Result", "value": result_field, "inline": True},
+            {"name": "🥅 Goals", "value": goals_field, "inline": True},
+            {"name": "🎯 Likely Scores", "value": scores_field, "inline": True},
+            {"name": "📈 Statistically Strongest Tip", "value": tip_field, "inline": False},
+            {"name": "🧠 Why", "value": why_field, "inline": False},
+        ],
+        "footer": {"text": f"Poisson model from each team's actual goals.{sample_note} Statistical estimate, not a guaranteed outcome — bet responsibly."},
+    }
+    if emblem_url:
+        embed["author"]["icon_url"] = emblem_url
+        embed["thumbnail"] = {"url": emblem_url}
+    return embed
+
+
 def scan_competition(competition_code, competition_name):
-    """Returns list of (probs, message, kickoff_iso, match_id) for upcoming matches in this competition."""
+    """Returns list of (probs, embed, kickoff_iso, match_id) for upcoming matches in this competition.
+    `embed` is a Discord embed dict ready to post via a webhook."""
     national = competition_code in NATIONAL_TEAM_COMPETITIONS
     finished = get_finished_matches(competition_code)
     league_stats = build_team_stats(finished, pooled=national)
@@ -335,8 +411,7 @@ def scan_competition(competition_code, competition_name):
 
     min_games = 2 if national else 6
     sample_note = (
-        " Based on a small early-tournament sample (heavily regularized toward the field average, "
-        "so probabilities stay deliberately cautious until more matches are played)."
+        " Based on a small early-tournament sample (heavily regularized toward the field average)."
         if national else ""
     )
 
@@ -349,6 +424,8 @@ def scan_competition(competition_code, competition_name):
         if not probs:
             continue
         kickoff = m.get("utcDate", "TBD")
-        msg = format_match_probabilities(competition_name, home_team, away_team, probs, kickoff, sample_note, neutral=national)
-        results.append((probs, msg, kickoff, m["id"]))
+        emblem = (m.get("competition") or {}).get("emblem")
+        embed = format_match_embed(competition_name, home_team, away_team, probs, kickoff,
+                                   sample_note, neutral=national, emblem_url=emblem)
+        results.append((probs, embed, kickoff, m["id"]))
     return results
