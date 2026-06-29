@@ -148,6 +148,7 @@ def build_team_stats(matches, pooled=False):
             "away_attack": away_attack,
             "away_defense": away_defense,
             "games": len(h_games) + len(a_games),
+            "form_ppg": _form_ppg(h_games + a_games),
         }
 
     return {
@@ -211,6 +212,39 @@ def compute_elo(matches, neutral):
     return ratings
 
 
+# ---- Equation 4: Recent-form model (points-per-game over the last handful of games) ----
+FORM_HOME_ADV_PPG = 0.35  # home teams average ~0.35 more points per game
+
+
+def _form_ppg(games, max_games=6):
+    """Recency-weighted points per game over a team's most recent matches (win=3, draw=1, loss=0)."""
+    games_sorted = sorted(games, key=lambda g: g[0], reverse=True)[:max_games]
+    if not games_sorted:
+        return 1.5  # neutral prior (~mid-table)
+    wsum = psum = 0.0
+    for i, (_, gf, ga) in enumerate(games_sorted):
+        w = RECENCY_DECAY ** i
+        pts = 3 if gf > ga else (1 if gf == ga else 0)
+        wsum += w
+        psum += w * pts
+    return psum / wsum
+
+
+def form_result(league_stats, home_team, away_team):
+    """Recent-form win/draw/loss for the home team, from points-per-game momentum."""
+    teams = league_stats["teams"]
+    hp = teams[home_team].get("form_ppg", 1.5)
+    ap = teams[away_team].get("form_ppg", 1.5)
+    if not league_stats.get("neutral"):
+        hp += FORM_HOME_ADV_PPG
+    we = hp / (hp + ap) if (hp + ap) > 0 else 0.5      # expected home points share
+    p_draw = 0.30 * math.exp(-(((we - 0.5) / 0.22) ** 2))
+    p_home = max(we - p_draw / 2.0, 0.0)
+    p_away = max((1.0 - we) - p_draw / 2.0, 0.0)
+    s = p_home + p_draw + p_away
+    return p_home / s, p_draw / s, p_away / s
+
+
 def elo_result(league_stats, home_team, away_team):
     """Elo win/draw/loss for the home team."""
     elo = league_stats.get("elo", {})
@@ -258,11 +292,13 @@ def match_probabilities(league_stats, home_team, away_team, min_games=6):
 
     # ---- Equation 3: Elo result (independent rating-based estimate) ----
     elo_home, elo_draw, elo_away = elo_result(league_stats, home_team, away_team)
+    # ---- Equation 4: recent-form result (points-per-game momentum) ----
+    form_home, form_draw, form_away = form_result(league_stats, home_team, away_team)
 
-    # ---- Consensus: average the two result models (goal-based + rating-based) ----
-    home_win = 0.5 * pdc_home + 0.5 * elo_home
-    draw = 0.5 * pdc_draw + 0.5 * elo_draw
-    away_win = 0.5 * pdc_away + 0.5 * elo_away
+    # ---- Consensus: average the three result models (goals + rating + form) ----
+    home_win = (pdc_home + elo_home + form_home) / 3.0
+    draw = (pdc_draw + elo_draw + form_draw) / 3.0
+    away_win = (pdc_away + elo_away + form_away) / 3.0
     total = home_win + draw + away_win
     home_win, draw, away_win = home_win / total, draw / total, away_win / total
 
@@ -293,6 +329,7 @@ def match_probabilities(league_stats, home_team, away_team, min_games=6):
         "models": {
             "poisson_dc": (pdc_home, pdc_draw, pdc_away),
             "elo": (elo_home, elo_draw, elo_away),
+            "form": (form_home, form_draw, form_away),
         },
     }
 
@@ -463,9 +500,11 @@ def format_match_embed(competition_name, home_team, away_team, probs, kickoff,
     if models:
         pdc = models.get("poisson_dc")
         elo = models.get("elo")
+        form = models.get("form")
         methods_field = (
             f"`Poisson+DC`  {pdc[0]*100:.0f}/{pdc[1]*100:.0f}/{pdc[2]*100:.0f}\n"
             f"`Elo rating`  {elo[0]*100:.0f}/{elo[1]*100:.0f}/{elo[2]*100:.0f}\n"
+            f"`Form (PPG)`  {form[0]*100:.0f}/{form[1]*100:.0f}/{form[2]*100:.0f}\n"
             f"`Consensus `  {hw*100:.0f}/{dr*100:.0f}/{aw*100:.0f}\n"
             f"_home / draw / away %_"
         )
@@ -515,7 +554,7 @@ def format_match_embed(competition_name, home_team, away_team, probs, kickoff,
             {"name": "📈 Statistically Strongest Tip", "value": tip_field, "inline": False},
             {"name": "🧠 Why", "value": why_field, "inline": False},
         ],
-        "footer": {"text": f"Ensemble: Poisson + Dixon-Coles + Elo, from each team's actual results.{sample_note} Statistical estimate, not a guaranteed outcome — bet responsibly."},
+        "footer": {"text": f"Ensemble: Poisson + Dixon-Coles + Elo + recent form.{sample_note} Statistical estimate, not a guaranteed outcome — bet responsibly."},
     }
     if emblem_url:
         embed["author"]["icon_url"] = emblem_url
