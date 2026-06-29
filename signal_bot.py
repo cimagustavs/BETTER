@@ -374,11 +374,18 @@ def run_daily_specials():
     if not upcoming:
         return
 
-    # FREE: single highest-confidence tip of the day as a teaser of the paid product.
+    # FREE: tease the day's strongest play but keep the actual pick locked behind VIP.
     if DAILY_LOCK_WEBHOOK:
         best = upcoming[0]
-        embed = soccer_model.embed_for(best, include_tip=True)
-        embed["title"] = "🔒 FREE LOCK OF THE DAY  •  " + embed["title"]
+        embed = soccer_model.embed_for(best, include_tip=False)
+        embed["title"] = "🔒 LOCK OF THE DAY  •  " + embed["title"]
+        for f in embed["fields"]:
+            if "Tip" in f["name"]:
+                f["value"] = (
+                    "🔒 This is the model's **single highest-confidence pick of the day** — "
+                    "its strongest lean across every match.\nThe exact bet is **VIP only**. "
+                    "Upgrade to **Silver** or **Gold** to unlock it (plus every other tip today)."
+                )
         post_to_discord(DAILY_LOCK_WEBHOOK, embed=embed)
 
     # GOLD: parlay of the top legs (combined odds = product of fair odds).

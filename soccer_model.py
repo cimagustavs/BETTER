@@ -414,8 +414,8 @@ def format_match_embed(competition_name, home_team, away_team, probs, kickoff,
         )
     else:
         tip_field = (
-            "🔒 **VIP only** — upgrade to **Silver** or **Gold** to see the model's "
-            "recommended bet for this match.\n_A free tip is posted daily in #daily-lock-of-the-day._"
+            "🔒 **VIP only** — the model's recommended bet for this match is reserved for "
+            "**Silver** and **Gold** members. Upgrade to unlock every pick."
         )
 
     title = f"⚽ {home_team}  vs  {away_team}"
