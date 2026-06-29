@@ -365,8 +365,10 @@ def _confidence_color(top_prob):
 
 
 def format_match_embed(competition_name, home_team, away_team, probs, kickoff,
-                       sample_note="", neutral=False, emblem_url=None):
-    """Build a rich Discord embed (color-coded, structured fields, competition emblem) for a match."""
+                       sample_note="", neutral=False, emblem_url=None, include_tip=True, premium=False):
+    """Build a rich Discord embed (color-coded, structured fields, competition emblem) for a match.
+    include_tip=False hides the actual pick behind a VIP teaser (free-tier version).
+    premium=True flags the match as a high-confidence Gold 'premium play'."""
     home_ctx = "overall" if neutral else "at home"
     away_ctx = "overall" if neutral else "away"
 
@@ -404,16 +406,26 @@ def format_match_embed(competition_name, home_team, away_team, probs, kickoff,
         f"• **{away_team}** {away_ctx}: {_rating_phrase(probs['away_attack'],'attack')}; "
         f"{_rating_phrase(probs['away_defense'],'defense')}."
     )
-    tip_field = (
-        f"➡️ **{tip_label}**\n"
-        f"Model probability `{tip_prob*100:.1f}%`  •  Fair odds `{tip_fair:.2f}`\n"
-        f"_Only worth backing if a book prices it above {tip_fair:.2f}._"
-    )
+    if include_tip:
+        tip_field = (
+            f"➡️ **{tip_label}**\n"
+            f"Model probability `{tip_prob*100:.1f}%`  •  Fair odds `{tip_fair:.2f}`\n"
+            f"_Only worth backing if a book prices it above {tip_fair:.2f}._"
+        )
+    else:
+        tip_field = (
+            "🔒 **VIP only** — upgrade to **Silver** or **Gold** to see the model's "
+            "recommended bet for this match.\n_A free tip is posted daily in #daily-lock-of-the-day._"
+        )
+
+    title = f"⚽ {home_team}  vs  {away_team}"
+    if premium:
+        title = "⭐ PREMIUM PLAY  •  " + title
 
     embed = {
-        "title": f"⚽ {home_team}  vs  {away_team}",
+        "title": title,
         "description": f"🕐 Kickoff: {kickoff_line}\n📐 Expected score: **{probs['exp_home_goals']:.1f} – {probs['exp_away_goals']:.1f}**",
-        "color": _confidence_color(top_prob),
+        "color": 0xF1C40F if premium else _confidence_color(top_prob),
         "author": {"name": competition_name},
         "fields": [
             {"name": "📊 Match Result", "value": result_field, "inline": True},
@@ -456,22 +468,32 @@ def scan_competition(competition_code, competition_name):
             continue
         kickoff = m.get("utcDate", "TBD")
         emblem = (m.get("competition") or {}).get("emblem")
-        embed = format_match_embed(competition_name, home_team, away_team, probs, kickoff,
-                                   sample_note, neutral=national, emblem_url=emblem)
-        tip_label, _tp, tip_odds, tip_desc = strongest_tip(probs, home_team, away_team)
+        tip_label, tip_prob, tip_odds, tip_desc = strongest_tip(probs, home_team, away_team)
         results.append({
             "probs": probs,
-            "embed": embed,
             "kickoff": kickoff,
             "match_id": m["id"],
             "home": home_team,
             "away": away_team,
             "competition": competition_name,
+            "sample_note": sample_note,
+            "neutral": national,
+            "emblem": emblem,
             "tip_label": tip_label,
+            "tip_prob": tip_prob,
             "tip_odds": tip_odds,
             "tip_descriptor": tip_desc,
         })
     return results
+
+
+def embed_for(match, include_tip=True, premium=False):
+    """Render a Discord embed for a match dict from scan_competition, with the given access flags."""
+    return format_match_embed(
+        match["competition"], match["home"], match["away"], match["probs"], match["kickoff"],
+        sample_note=match["sample_note"], neutral=match["neutral"], emblem_url=match["emblem"],
+        include_tip=include_tip, premium=premium,
+    )
 
 
 def get_match_result(competition_code, match_id):

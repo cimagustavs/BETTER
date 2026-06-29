@@ -14,6 +14,11 @@ FREE_WEBHOOK = os.environ["FREE_WEBHOOK"]
 SILVER_WEBHOOK = os.environ["SILVER_WEBHOOK"]
 GOLD_WEBHOOK = os.environ["GOLD_WEBHOOK"]
 HIT_HISTORY_WEBHOOK = os.environ.get("HIT_HISTORY_WEBHOOK")  # optional; results tracker off if unset
+DAILY_LOCK_WEBHOOK = os.environ.get("DAILY_LOCK_WEBHOOK")    # free daily teaser pick
+PARLAY_WEBHOOK = os.environ.get("PARLAY_WEBHOOK")            # gold daily parlay
+BANKROLL_WEBHOOK = os.environ.get("BANKROLL_WEBHOOK")        # gold low-variance picks
+
+PREMIUM_THRESHOLD = 0.55  # top outcome >= this is flagged a Gold "premium play"
 
 soccer_model.FD_API_KEY = os.environ["FOOTBALL_DATA_API_KEY"]
 
@@ -243,21 +248,24 @@ def run_soccer_scan():
             if seconds_to_kickoff <= 0 or seconds_to_kickoff > SOCCER_LEAD_TIME_SECONDS:
                 continue
 
-            embed = match["embed"]
             probs = match["probs"]
             top_prob = max(probs["home_win"], probs["draw"], probs["away_win"])
+            premium = top_prob >= PREMIUM_THRESHOLD
 
-            # Always post into the competition's own channel so each league channel stays active.
+            free_embed = soccer_model.embed_for(match, include_tip=False)
+            paid_embed = soccer_model.embed_for(match, include_tip=True)
+            gold_embed = soccer_model.embed_for(match, include_tip=True, premium=premium)
+
+            # FREE: full analysis but the actual tip is hidden behind a VIP teaser.
+            # Goes to the public competition channel and #free-picks.
             comp_webhook = COMPETITION_WEBHOOKS.get(code)
             if comp_webhook:
-                post_to_discord(comp_webhook, embed=embed)
+                post_to_discord(comp_webhook, embed=free_embed)
+            post_to_discord(FREE_WEBHOOK, embed=free_embed)
 
-            # Tiered VIP routing by model confidence.
-            post_to_discord(FREE_WEBHOOK, embed=embed)
-            if top_prob >= 0.45:
-                post_to_discord(SILVER_WEBHOOK, embed=embed)
-            if top_prob >= 0.55:
-                post_to_discord(GOLD_WEBHOOK, embed=embed)
+            # PAID: Silver and Gold both get the tip on every match; Gold flags premium plays.
+            post_to_discord(SILVER_WEBHOOK, embed=paid_embed)
+            post_to_discord(GOLD_WEBHOOK, embed=gold_embed)
             posted_soccer_matches.add(match_id)
 
             # Record the tip for later settlement in #hit-history.
@@ -329,6 +337,86 @@ def run_settlement_scan():
         results.save_state(RESULTS_STATE)
 
 
+def _gather_upcoming(hours_ahead=30):
+    """All upcoming matches across competitions kicking off within the next `hours_ahead`,
+    each with its tip, sorted by tip probability (strongest first)."""
+    from datetime import datetime as _dt
+    now = datetime.now(timezone.utc)
+    out = []
+    for code, name in soccer_model.COMPETITIONS.items():
+        try:
+            matches = soccer_model.scan_competition(code, name)
+        except Exception as e:
+            print(f"Daily gather failed for {name}: {e}")
+            continue
+        for match in matches:
+            try:
+                ko = _dt.fromisoformat(match["kickoff"].replace("Z", "+00:00"))
+            except (ValueError, AttributeError):
+                continue
+            secs = (ko - now).total_seconds()
+            if 0 < secs <= hours_ahead * 3600:
+                out.append(match)
+        time.sleep(1)
+    out.sort(key=lambda m: m["tip_prob"], reverse=True)
+    return out
+
+
+def run_daily_specials():
+    """Once per UTC day: post the free daily lock, the Gold parlay, and Gold bankroll-builder picks."""
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    if RESULTS_STATE.get("daily_specials_date") == today:
+        return
+    if not (DAILY_LOCK_WEBHOOK or PARLAY_WEBHOOK or BANKROLL_WEBHOOK):
+        return
+
+    upcoming = _gather_upcoming()
+    if not upcoming:
+        return
+
+    # FREE: single highest-confidence tip of the day as a teaser of the paid product.
+    if DAILY_LOCK_WEBHOOK:
+        best = upcoming[0]
+        embed = soccer_model.embed_for(best, include_tip=True)
+        embed["title"] = "🔒 FREE LOCK OF THE DAY  •  " + embed["title"]
+        post_to_discord(DAILY_LOCK_WEBHOOK, embed=embed)
+
+    # GOLD: parlay of the top legs (combined odds = product of fair odds).
+    if PARLAY_WEBHOOK and len(upcoming) >= 2:
+        legs = upcoming[:3]
+        combined_odds = 1.0
+        combined_prob = 1.0
+        leg_lines = []
+        for m in legs:
+            combined_odds *= m["tip_odds"]
+            combined_prob *= m["tip_prob"]
+            leg_lines.append(f"• **{m['home']} vs {m['away']}** — {m['tip_label']} `@{m['tip_odds']:.2f}`")
+        post_to_discord(PARLAY_WEBHOOK, embed={
+            "title": "🎲 Parlay of the Day",
+            "color": 0xF1C40F,
+            "description": "\n".join(leg_lines) +
+                           f"\n\n**Combined odds:** `{combined_odds:.2f}`\n"
+                           f"**Model probability all hit:** `{combined_prob*100:.1f}%`",
+            "footer": {"text": "Parlays are high-variance by design — stake small. Statistical estimate, not a guaranteed outcome."},
+        })
+
+    # GOLD: low-variance bankroll-builder — the day's safest higher-probability singles.
+    if BANKROLL_WEBHOOK:
+        safe = upcoming[:4]
+        lines = [f"• **{m['home']} vs {m['away']}** — {m['tip_label']} `@{m['tip_odds']:.2f}`  ({m['tip_prob']*100:.0f}%)"
+                 for m in safe]
+        post_to_discord(BANKROLL_WEBHOOK, embed={
+            "title": "🏦 Bankroll Builder — Today's Safest Singles",
+            "color": 0x2ECC71,
+            "description": "\n".join(lines) +
+                           "\n\n_Higher-probability, lower-variance singles for steady growth. Flat stakes recommended._",
+            "footer": {"text": "Statistical estimate, not a guaranteed outcome — bet responsibly."},
+        })
+
+    RESULTS_STATE["daily_specials_date"] = today
+    results.save_state(RESULTS_STATE)
+
+
 def main():
     print(f"Signal bot starting at {datetime.now(timezone.utc).isoformat()}")
     while True:
@@ -336,6 +424,7 @@ def main():
             run_scan()
             run_soccer_scan()
             run_settlement_scan()
+            run_daily_specials()
         except Exception as e:
             print(f"Scan error: {e}")
         if len(posted_signals) > 5000:
