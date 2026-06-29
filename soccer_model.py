@@ -96,6 +96,7 @@ def build_team_stats(matches, pooled=False):
     total_home_goals = 0
     total_away_goals = 0
     total_games = 0
+    n_home = n_draw = n_away = 0  # outcome counts, for base-rate calibration
 
     for m in matches:
         score = m.get("score", {}).get("fullTime", {})
@@ -112,6 +113,12 @@ def build_team_stats(matches, pooled=False):
         total_home_goals += hg
         total_away_goals += ag
         total_games += 1
+        if hg > ag:
+            n_home += 1
+        elif hg == ag:
+            n_draw += 1
+        else:
+            n_away += 1
 
     if total_games == 0:
         return None
@@ -119,6 +126,7 @@ def build_team_stats(matches, pooled=False):
     league_avg_home_goals = total_home_goals / total_games
     league_avg_away_goals = total_away_goals / total_games
     league_avg_goals = (total_home_goals + total_away_goals) / (2 * total_games)  # per team, per game
+    base_rate = (n_home / total_games, n_draw / total_games, n_away / total_games)
 
     teams = set(list(home_matches.keys()) + list(away_matches.keys()))
     stats = {}
@@ -157,6 +165,7 @@ def build_team_stats(matches, pooled=False):
         "league_avg_away_goals": league_avg_away_goals,
         "elo": compute_elo(matches, pooled),
         "neutral": pooled,
+        "base_rate": base_rate,
     }
 
 
@@ -165,6 +174,11 @@ def poisson_pmf(k, lam):
 
 
 NATIONAL_TEAM_COMPETITIONS = {"WC", "EC"}
+
+# Shrinks the consensus toward the league base rate to fix backtested overconfidence (0 = none, 1 = all base rate).
+# Tuned on 4 leagues' 2025 seasons: 0.3 moves tip ROI at fair odds from ~-9% to ~0% (calibrated, not over-
+# confident). This makes the displayed probabilities/odds honest; it does NOT manufacture a real-money edge.
+CALIBRATION_ALPHA = 0.3
 
 # ---- Equation 2: Dixon-Coles low-score correction to the Poisson grid ----
 DC_RHO = -0.10  # negative rho lifts 0-0 / 1-1, trims 1-0 / 0-1: corrects Poisson's under-count of draws
@@ -299,6 +313,16 @@ def match_probabilities(league_stats, home_team, away_team, min_games=6):
     home_win = (pdc_home + elo_home + form_home) / 3.0
     draw = (pdc_draw + elo_draw + form_draw) / 3.0
     away_win = (pdc_away + elo_away + form_away) / 3.0
+    total = home_win + draw + away_win
+    home_win, draw, away_win = home_win / total, draw / total, away_win / total
+
+    # ---- Calibration: backtest showed the raw consensus is overconfident, so shrink it toward
+    #      the league's empirical base rate. CALIBRATION_ALPHA tuned on historical seasons. ----
+    base = league_stats.get("base_rate") or (1 / 3, 1 / 3, 1 / 3)
+    a = CALIBRATION_ALPHA
+    home_win = (1 - a) * home_win + a * base[0]
+    draw = (1 - a) * draw + a * base[1]
+    away_win = (1 - a) * away_win + a * base[2]
     total = home_win + draw + away_win
     home_win, draw, away_win = home_win / total, draw / total, away_win / total
 
