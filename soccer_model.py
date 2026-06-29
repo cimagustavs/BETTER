@@ -154,6 +154,8 @@ def build_team_stats(matches, pooled=False):
         "teams": stats,
         "league_avg_home_goals": league_avg_home_goals,
         "league_avg_away_goals": league_avg_away_goals,
+        "elo": compute_elo(matches, pooled),
+        "neutral": pooled,
     }
 
 
@@ -162,6 +164,66 @@ def poisson_pmf(k, lam):
 
 
 NATIONAL_TEAM_COMPETITIONS = {"WC", "EC"}
+
+# ---- Equation 2: Dixon-Coles low-score correction to the Poisson grid ----
+DC_RHO = -0.10  # negative rho lifts 0-0 / 1-1, trims 1-0 / 0-1: corrects Poisson's under-count of draws
+
+
+def _dc_tau(x, y, lam, mu, rho=DC_RHO):
+    if x == 0 and y == 0:
+        return 1.0 - lam * mu * rho
+    if x == 0 and y == 1:
+        return 1.0 + lam * rho
+    if x == 1 and y == 0:
+        return 1.0 + mu * rho
+    if x == 1 and y == 1:
+        return 1.0 - rho
+    return 1.0
+
+
+# ---- Equation 3: Elo ratings (a rating-based paradigm, independent of the goal model) ----
+ELO_START = 1500.0
+ELO_K = 20.0
+ELO_HOME_ADV = 60.0       # rating points of home advantage (0 at neutral venues)
+ELO_DRAW_MAX = 0.28       # peak draw probability when teams are evenly rated
+ELO_DRAW_SCALE = 300.0
+
+
+def compute_elo(matches, neutral):
+    """Sequential Elo over the match history, with a mild margin-of-victory multiplier."""
+    ratings = {}
+    home_adv = 0.0 if neutral else ELO_HOME_ADV
+    for m in sorted(matches, key=lambda x: x.get("utcDate", "")):
+        ft = m.get("score", {}).get("fullTime", {})
+        hg, ag = ft.get("home"), ft.get("away")
+        if hg is None or ag is None:
+            continue
+        h = m["homeTeam"]["name"]
+        a = m["awayTeam"]["name"]
+        rh = ratings.get(h, ELO_START)
+        ra = ratings.get(a, ELO_START)
+        exp_h = 1.0 / (1.0 + 10 ** (-(rh - ra + home_adv) / 400.0))
+        act_h = 1.0 if hg > ag else (0.5 if hg == ag else 0.0)
+        mov = math.log(abs(hg - ag) + 1) + 1.0
+        delta = ELO_K * mov * (act_h - exp_h)
+        ratings[h] = rh + delta
+        ratings[a] = ra - delta
+    return ratings
+
+
+def elo_result(league_stats, home_team, away_team):
+    """Elo win/draw/loss for the home team."""
+    elo = league_stats.get("elo", {})
+    rh = elo.get(home_team, ELO_START)
+    ra = elo.get(away_team, ELO_START)
+    home_adv = 0.0 if league_stats.get("neutral") else ELO_HOME_ADV
+    diff = rh - ra + home_adv
+    we = 1.0 / (1.0 + 10 ** (-diff / 400.0))             # expected points share for home
+    p_draw = ELO_DRAW_MAX * math.exp(-((diff / ELO_DRAW_SCALE) ** 2))
+    p_home = max(we - p_draw / 2.0, 0.0)
+    p_away = max((1.0 - we) - p_draw / 2.0, 0.0)
+    s = p_home + p_draw + p_away
+    return p_home / s, p_draw / s, p_away / s
 
 
 def match_probabilities(league_stats, home_team, away_team, min_games=6):
@@ -178,45 +240,45 @@ def match_probabilities(league_stats, home_team, away_team, min_games=6):
     exp_home_goals = league_stats["league_avg_home_goals"] * home["home_attack"] * away["away_defense"]
     exp_away_goals = league_stats["league_avg_away_goals"] * away["away_attack"] * home["home_defense"]
 
-    home_win = draw = away_win = 0.0
+    # ---- Equation 1+2: Poisson goal grid with Dixon-Coles low-score correction ----
+    grid = {}
     for hg in range(MAX_GOALS + 1):
         for ag in range(MAX_GOALS + 1):
             p = poisson_pmf(hg, exp_home_goals) * poisson_pmf(ag, exp_away_goals)
-            if hg > ag:
-                home_win += p
-            elif hg == ag:
-                draw += p
-            else:
-                away_win += p
-
-    total = home_win + draw + away_win
-    if total == 0:
+            p *= _dc_tau(hg, ag, exp_home_goals, exp_away_goals)
+            grid[(hg, ag)] = max(p, 0.0)
+    gsum = sum(grid.values())
+    if gsum == 0:
         return None
+    grid = {k: v / gsum for k, v in grid.items()}
 
-    # Exact scorelines: same independent-Poisson grid, just kept per-cell instead of collapsed to W/D/L.
-    scoreline_probs = {}
-    for hg in range(MAX_GOALS + 1):
-        for ag in range(MAX_GOALS + 1):
-            scoreline_probs[(hg, ag)] = poisson_pmf(hg, exp_home_goals) * poisson_pmf(ag, exp_away_goals)
-    top_scorelines = sorted(scoreline_probs.items(), key=lambda x: -x[1])[:3]
+    pdc_home = sum(p for (hg, ag), p in grid.items() if hg > ag)
+    pdc_draw = sum(p for (hg, ag), p in grid.items() if hg == ag)
+    pdc_away = sum(p for (hg, ag), p in grid.items() if hg < ag)
 
-    # Total goals = sum of two independent Poisson variables -> itself Poisson(lambda_home + lambda_away).
-    total_lambda = exp_home_goals + exp_away_goals
+    # ---- Equation 3: Elo result (independent rating-based estimate) ----
+    elo_home, elo_draw, elo_away = elo_result(league_stats, home_team, away_team)
+
+    # ---- Consensus: average the two result models (goal-based + rating-based) ----
+    home_win = 0.5 * pdc_home + 0.5 * elo_home
+    draw = 0.5 * pdc_draw + 0.5 * elo_draw
+    away_win = 0.5 * pdc_away + 0.5 * elo_away
+    total = home_win + draw + away_win
+    home_win, draw, away_win = home_win / total, draw / total, away_win / total
+
+    # Goal markets come from the Dixon-Coles grid (Elo doesn't model goals).
+    top_scorelines = sorted(grid.items(), key=lambda x: -x[1])[:3]
     over_under = {}
     for line in (1.5, 2.5, 3.5):
-        threshold = int(line) + 1  # over 2.5 means >=3 goals
-        p_under = sum(poisson_pmf(k, total_lambda) for k in range(threshold))
+        thresh = int(line)  # under 2.5 => total goals <= 2
+        p_under = sum(p for (hg, ag), p in grid.items() if hg + ag <= thresh)
         over_under[line] = {"over": 1 - p_under, "under": p_under}
-
-    # BTTS: independent home/away scoring, so P(both score) = (1 - P(home=0)) * (1 - P(away=0)).
-    p_home_scores = 1 - poisson_pmf(0, exp_home_goals)
-    p_away_scores = 1 - poisson_pmf(0, exp_away_goals)
-    btts_yes = p_home_scores * p_away_scores
+    btts_yes = sum(p for (hg, ag), p in grid.items() if hg > 0 and ag > 0)
 
     return {
-        "home_win": home_win / total,
-        "draw": draw / total,
-        "away_win": away_win / total,
+        "home_win": home_win,
+        "draw": draw,
+        "away_win": away_win,
         "exp_home_goals": exp_home_goals,
         "exp_away_goals": exp_away_goals,
         "home_attack": home["home_attack"],
@@ -225,9 +287,13 @@ def match_probabilities(league_stats, home_team, away_team, min_games=6):
         "away_defense": away["away_defense"],
         "home_games": home["games"],
         "away_games": away["games"],
-        "top_scorelines": [(score, p / total) for score, p in top_scorelines],
+        "top_scorelines": top_scorelines,
         "over_under": over_under,
         "btts_yes": btts_yes,
+        "models": {
+            "poisson_dc": (pdc_home, pdc_draw, pdc_away),
+            "elo": (elo_home, elo_draw, elo_away),
+        },
     }
 
 
@@ -389,8 +455,20 @@ def format_match_embed(competition_name, home_team, away_team, probs, kickoff,
     result_field = (
         f"🏠 **{home_team}**  `{hw*100:.1f}%`\n"
         f"🤝 Draw  `{dr*100:.1f}%`\n"
-        f"🛫 **{away_team}**  `{aw*100:.1f}%`"
+        f"🛫 **{away_team}**  `{aw*100:.1f}%`\n"
+        f"_consensus of {len(probs.get('models', {})) or 1} models_"
     )
+    models = probs.get("models", {})
+    methods_field = None
+    if models:
+        pdc = models.get("poisson_dc")
+        elo = models.get("elo")
+        methods_field = (
+            f"`Poisson+DC`  {pdc[0]*100:.0f}/{pdc[1]*100:.0f}/{pdc[2]*100:.0f}\n"
+            f"`Elo rating`  {elo[0]*100:.0f}/{elo[1]*100:.0f}/{elo[2]*100:.0f}\n"
+            f"`Consensus `  {hw*100:.0f}/{dr*100:.0f}/{aw*100:.0f}\n"
+            f"_home / draw / away %_"
+        )
     goals_field = (
         f"Over 1.5  `{ou[1.5]['over']*100:.0f}%`\n"
         f"Over 2.5  `{ou[2.5]['over']*100:.0f}%`\n"
@@ -431,10 +509,13 @@ def format_match_embed(competition_name, home_team, away_team, probs, kickoff,
             {"name": "📊 Match Result", "value": result_field, "inline": True},
             {"name": "🥅 Goals", "value": goals_field, "inline": True},
             {"name": "🎯 Likely Scores", "value": scores_field, "inline": True},
+        ]
+        + ([{"name": "🧮 Models", "value": methods_field, "inline": False}] if methods_field else [])
+        + [
             {"name": "📈 Statistically Strongest Tip", "value": tip_field, "inline": False},
             {"name": "🧠 Why", "value": why_field, "inline": False},
         ],
-        "footer": {"text": f"Poisson model from each team's actual goals.{sample_note} Statistical estimate, not a guaranteed outcome — bet responsibly."},
+        "footer": {"text": f"Ensemble: Poisson + Dixon-Coles + Elo, from each team's actual results.{sample_note} Statistical estimate, not a guaranteed outcome — bet responsibly."},
     }
     if emblem_url:
         embed["author"]["icon_url"] = emblem_url
