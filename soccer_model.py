@@ -256,29 +256,59 @@ def strongest_tip(probs, home_team, away_team, min_odds=MIN_TIP_ODDS):
     safest bet the model supports that nonetheless pays a meaningful return (avoids suggesting
     near-locks like 'Over 1.5 goals @ 1.07'). Returns (label, probability, fair_odds)."""
     hw, dr, aw = probs["home_win"], probs["draw"], probs["away_win"]
+    # Each candidate: (label, probability, market_descriptor). The descriptor lets the results
+    # tracker settle the tip against a final score without re-parsing the label text.
     candidates = [
-        (f"{home_team} to win", hw),
-        (f"{away_team} to win", aw),
-        ("Draw", dr),
-        (f"{home_team} or Draw (double chance)", hw + dr),
-        (f"{away_team} or Draw (double chance)", aw + dr),
-        (f"{home_team} or {away_team} (double chance)", hw + aw),
-        ("Both teams to score: Yes", probs["btts_yes"]),
-        ("Both teams to score: No", 1 - probs["btts_yes"]),
+        (f"{home_team} to win", hw, ("HOME",)),
+        (f"{away_team} to win", aw, ("AWAY",)),
+        ("Draw", dr, ("DRAW",)),
+        (f"{home_team} or Draw (double chance)", hw + dr, ("DC", "HD")),
+        (f"{away_team} or Draw (double chance)", aw + dr, ("DC", "AD")),
+        (f"{home_team} or {away_team} (double chance)", hw + aw, ("DC", "HA")),
+        ("Both teams to score: Yes", probs["btts_yes"], ("BTTS", "YES")),
+        ("Both teams to score: No", 1 - probs["btts_yes"], ("BTTS", "NO")),
     ]
     for line, d in probs["over_under"].items():
-        candidates.append((f"Over {line} goals", d["over"]))
-        candidates.append((f"Under {line} goals", d["under"]))
+        candidates.append((f"Over {line} goals", d["over"], ("OVER", line)))
+        candidates.append((f"Under {line} goals", d["under"], ("UNDER", line)))
 
     prob_cap = 1.0 / min_odds
-    qualifying = [(label, p) for label, p in candidates if 0 < p <= prob_cap]
+    qualifying = [c for c in candidates if 0 < c[1] <= prob_cap]
     # There is always at least one outcome below the cap (the weaker side of the 1X2 trio),
     # but fall back to the full set just in case so we always return something.
     pool = qualifying or candidates
 
-    label, p = max(pool, key=lambda c: c[1])
+    label, p, descriptor = max(pool, key=lambda c: c[1])
     fair = (1.0 / p) if p > 0 else float("inf")
-    return label, p, fair
+    return label, p, fair, descriptor
+
+
+def settle_tip(descriptor, home_goals, away_goals):
+    """Evaluate whether a tip's market descriptor hit, given the final score. Returns True/False."""
+    kind = descriptor[0]
+    total = home_goals + away_goals
+    if kind == "HOME":
+        return home_goals > away_goals
+    if kind == "AWAY":
+        return away_goals > home_goals
+    if kind == "DRAW":
+        return home_goals == away_goals
+    if kind == "DC":
+        which = descriptor[1]
+        if which == "HD":
+            return home_goals >= away_goals
+        if which == "AD":
+            return away_goals >= home_goals
+        if which == "HA":
+            return home_goals != away_goals
+    if kind == "OVER":
+        return total > descriptor[1]
+    if kind == "UNDER":
+        return total < descriptor[1]
+    if kind == "BTTS":
+        both = home_goals > 0 and away_goals > 0
+        return both if descriptor[1] == "YES" else not both
+    return False
 
 
 def format_match_probabilities(competition_name, home_team, away_team, probs, kickoff, sample_note="", neutral=False):
@@ -298,7 +328,7 @@ def format_match_probabilities(competition_name, home_team, away_team, probs, ki
         for line in sorted(ou.keys())
     )
 
-    tip_label, tip_prob, tip_fair = strongest_tip(probs, home_team, away_team)
+    tip_label, tip_prob, tip_fair, _tip_desc = strongest_tip(probs, home_team, away_team)
 
     return (
         f"**[{competition_name}] {home_team} vs {away_team}**\n"
@@ -342,7 +372,7 @@ def format_match_embed(competition_name, home_team, away_team, probs, kickoff,
 
     hw, dr, aw = probs["home_win"], probs["draw"], probs["away_win"]
     top_prob = max(hw, dr, aw)
-    tip_label, tip_prob, tip_fair = strongest_tip(probs, home_team, away_team)
+    tip_label, tip_prob, tip_fair, _tip_desc = strongest_tip(probs, home_team, away_team)
     ou = probs["over_under"]
 
     # Discord auto-localizes <t:unix:F> to each viewer's own timezone.
@@ -401,8 +431,9 @@ def format_match_embed(competition_name, home_team, away_team, probs, kickoff,
 
 
 def scan_competition(competition_code, competition_name):
-    """Returns list of (probs, embed, kickoff_iso, match_id) for upcoming matches in this competition.
-    `embed` is a Discord embed dict ready to post via a webhook."""
+    """Returns a list of per-match dicts for upcoming matches in this competition. Each dict has:
+    probs, embed (ready to post), kickoff, match_id, home, away, competition, tip_label,
+    tip_odds, tip_descriptor (for later settlement)."""
     national = competition_code in NATIONAL_TEAM_COMPETITIONS
     finished = get_finished_matches(competition_code)
     league_stats = build_team_stats(finished, pooled=national)
@@ -427,5 +458,29 @@ def scan_competition(competition_code, competition_name):
         emblem = (m.get("competition") or {}).get("emblem")
         embed = format_match_embed(competition_name, home_team, away_team, probs, kickoff,
                                    sample_note, neutral=national, emblem_url=emblem)
-        results.append((probs, embed, kickoff, m["id"]))
+        tip_label, _tp, tip_odds, tip_desc = strongest_tip(probs, home_team, away_team)
+        results.append({
+            "probs": probs,
+            "embed": embed,
+            "kickoff": kickoff,
+            "match_id": m["id"],
+            "home": home_team,
+            "away": away_team,
+            "competition": competition_name,
+            "tip_label": tip_label,
+            "tip_odds": tip_odds,
+            "tip_descriptor": tip_desc,
+        })
     return results
+
+
+def get_match_result(competition_code, match_id):
+    """Return (home_goals, away_goals) for a finished match, or None if not finished/found."""
+    finished = get_finished_matches(competition_code)
+    for m in finished:
+        if m["id"] == match_id:
+            ft = m.get("score", {}).get("fullTime", {})
+            hg, ag = ft.get("home"), ft.get("away")
+            if hg is not None and ag is not None:
+                return hg, ag
+    return None

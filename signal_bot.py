@@ -1,10 +1,11 @@
 import os
+import json
 import time
 import requests
-from itertools import combinations
 from datetime import datetime, timezone
 
 import soccer_model
+import results
 
 ODDS_API_KEY = os.environ["ODDS_API_KEY"]
 ARB_WEBHOOK = os.environ["ARB_WEBHOOK"]
@@ -12,8 +13,12 @@ VAL_WEBHOOK = os.environ["VAL_WEBHOOK"]
 FREE_WEBHOOK = os.environ["FREE_WEBHOOK"]
 SILVER_WEBHOOK = os.environ["SILVER_WEBHOOK"]
 GOLD_WEBHOOK = os.environ["GOLD_WEBHOOK"]
+HIT_HISTORY_WEBHOOK = os.environ.get("HIT_HISTORY_WEBHOOK")  # optional; results tracker off if unset
 
 soccer_model.FD_API_KEY = os.environ["FOOTBALL_DATA_API_KEY"]
+
+# Optional banner image attached to each result card (path inside the repo). Degrades gracefully if missing.
+BANNER_PATH = os.environ.get("BANNER_PATH", os.path.join(os.path.dirname(__file__), "assets", "tip_banner.png"))
 
 # Per-competition channel webhooks (optional — only routed if the env var is set).
 COMPETITION_WEBHOOKS = {
@@ -21,6 +26,9 @@ COMPETITION_WEBHOOKS = {
     for code in ("PL", "PD", "SA", "BL1", "FL1", "CL", "WC")
     if os.environ.get(f"COMP_{code}_WEBHOOK")
 }
+
+# Map the-odds-api soccer keys <-> football-data competition codes used by the results tracker.
+RESULTS_STATE = results.load_state()
 
 SPORTS = [
     "soccer_epl",
@@ -213,16 +221,17 @@ def run_soccer_scan():
 
     for code, name in soccer_model.COMPETITIONS.items():
         try:
-            results = soccer_model.scan_competition(code, name)
+            matches = soccer_model.scan_competition(code, name)
         except Exception as e:
             print(f"Soccer scan failed for {name}: {e}")
             continue
 
-        for probs, embed, kickoff_iso, match_id in results:
+        for match in matches:
+            match_id = match["match_id"]
             if match_id in posted_soccer_matches:
                 continue
             try:
-                kickoff_dt = _dt.fromisoformat(kickoff_iso.replace("Z", "+00:00"))
+                kickoff_dt = _dt.fromisoformat(match["kickoff"].replace("Z", "+00:00"))
             except (ValueError, AttributeError):
                 continue
 
@@ -234,6 +243,8 @@ def run_soccer_scan():
             if seconds_to_kickoff <= 0 or seconds_to_kickoff > SOCCER_LEAD_TIME_SECONDS:
                 continue
 
+            embed = match["embed"]
+            probs = match["probs"]
             top_prob = max(probs["home_win"], probs["draw"], probs["away_win"])
 
             # Always post into the competition's own channel so each league channel stays active.
@@ -249,7 +260,73 @@ def run_soccer_scan():
                 post_to_discord(GOLD_WEBHOOK, embed=embed)
             posted_soccer_matches.add(match_id)
 
+            # Record the tip for later settlement in #hit-history.
+            if HIT_HISTORY_WEBHOOK:
+                results.record_pending(RESULTS_STATE, {
+                    "match_id": match_id,
+                    "code": code,
+                    "home": match["home"],
+                    "away": match["away"],
+                    "competition": match["competition"],
+                    "tip_label": match["tip_label"],
+                    "tip_odds": match["tip_odds"],
+                    "tip_descriptor": match["tip_descriptor"],
+                    "kickoff": match["kickoff"],
+                })
+                results.save_state(RESULTS_STATE)
+
         time.sleep(2)
+
+
+def post_result_card(embed):
+    """Post a settled-tip card to #hit-history, attaching the banner image if one is bundled."""
+    banner = os.path.basename(BANNER_PATH)
+    if os.path.isfile(BANNER_PATH):
+        embed = dict(embed, image={"url": f"attachment://{banner}"})
+        with open(BANNER_PATH, "rb") as f:
+            files = {"file": (banner, f.read(), "image/png")}
+        data = {"payload_json": json.dumps({"embeds": [embed]})}
+        for _ in range(3):
+            r = requests.post(HIT_HISTORY_WEBHOOK, data=data, files=files, timeout=15)
+            if r.status_code in (200, 204):
+                return
+            if r.status_code == 429:
+                time.sleep(r.json().get("retry_after", 1) + 0.2)
+                continue
+            print(f"hit-history post failed: {r.status_code} {r.text[:200]}")
+            return
+    else:
+        post_to_discord(HIT_HISTORY_WEBHOOK, embed=embed)
+
+
+def run_settlement_scan():
+    """Settle any pending tips whose match has finished: evaluate hit/miss, update running
+    profit, and post a result card to #hit-history."""
+    if not HIT_HISTORY_WEBHOOK:
+        return
+    pending = dict(RESULTS_STATE.get("pending", {}))
+    changed = False
+    for mid, bet in pending.items():
+        try:
+            result = soccer_model.get_match_result(bet["code"], bet["match_id"])
+        except Exception as e:
+            print(f"Settlement fetch failed for {bet.get('home')} v {bet.get('away')}: {e}")
+            continue
+        if result is None:
+            continue  # not finished yet
+        hg, ag = result
+        hit = soccer_model.settle_tip(tuple(bet["tip_descriptor"]), hg, ag)
+        delta = results.apply_settlement(RESULTS_STATE, hit, bet["tip_odds"])
+        embed = results.result_embed(bet, hg, ag, hit, delta, RESULTS_STATE)
+        post_result_card(embed)
+
+        RESULTS_STATE["pending"].pop(mid, None)
+        RESULTS_STATE["settled"].append(mid)
+        changed = True
+    if changed:
+        # keep the settled list from growing unbounded
+        RESULTS_STATE["settled"] = RESULTS_STATE["settled"][-2000:]
+        results.save_state(RESULTS_STATE)
 
 
 def main():
@@ -258,6 +335,7 @@ def main():
         try:
             run_scan()
             run_soccer_scan()
+            run_settlement_scan()
         except Exception as e:
             print(f"Scan error: {e}")
         if len(posted_signals) > 5000:
