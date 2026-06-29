@@ -248,11 +248,36 @@ def _rating_phrase(value, kind):
         return "concedes about league-average"
 
 
-def format_match_probabilities(competition_name, home_team, away_team, probs, kickoff, sample_note=""):
+def strongest_tip(probs, home_team, away_team):
+    """The single market outcome the model assigns the highest probability — i.e. the most
+    statistically supported bet for this match. Returns (label, probability, fair_odds)."""
+    hw, dr, aw = probs["home_win"], probs["draw"], probs["away_win"]
+    candidates = [
+        (f"{home_team} to win", hw),
+        (f"{away_team} to win", aw),
+        ("Draw", dr),
+        (f"{home_team} or Draw (double chance)", hw + dr),
+        (f"{away_team} or Draw (double chance)", aw + dr),
+        (f"{home_team} or {away_team} (double chance)", hw + aw),
+        ("Both teams to score: Yes", probs["btts_yes"]),
+        ("Both teams to score: No", 1 - probs["btts_yes"]),
+    ]
+    for line, d in probs["over_under"].items():
+        candidates.append((f"Over {line} goals", d["over"]))
+        candidates.append((f"Under {line} goals", d["under"]))
+
+    label, p = max(candidates, key=lambda c: c[1])
+    fair = (1.0 / p) if p > 0 else float("inf")
+    return label, p, fair
+
+
+def format_match_probabilities(competition_name, home_team, away_team, probs, kickoff, sample_note="", neutral=False):
     home_attack_phrase = _rating_phrase(probs["home_attack"], "attack")
     home_defense_phrase = _rating_phrase(probs["home_defense"], "defense")
     away_attack_phrase = _rating_phrase(probs["away_attack"], "attack")
     away_defense_phrase = _rating_phrase(probs["away_defense"], "defense")
+    home_ctx = "overall" if neutral else "at home"
+    away_ctx = "overall" if neutral else "away"
 
     scorelines_str = ", ".join(
         f"{hg}-{ag} ({p*100:.1f}%)" for (hg, ag), p in probs["top_scorelines"]
@@ -262,6 +287,8 @@ def format_match_probabilities(competition_name, home_team, away_team, probs, ki
         f"O/U {line}: {ou[line]['over']*100:.1f}% over / {ou[line]['under']*100:.1f}% under"
         for line in sorted(ou.keys())
     )
+
+    tip_label, tip_prob, tip_fair = strongest_tip(probs, home_team, away_team)
 
     return (
         f"**[{competition_name}] {home_team} vs {away_team}**\n"
@@ -275,11 +302,15 @@ def format_match_probabilities(competition_name, home_team, away_team, probs, ki
         f"  Both teams to score: {probs['btts_yes']*100:.1f}% yes / {(1-probs['btts_yes'])*100:.1f}% no\n"
         f"\n"
         f"  **Why:** (sample: {home_team} {probs['home_games']} games, {away_team} {probs['away_games']} games)\n"
-        f"  • {home_team} at home: {home_attack_phrase}; {home_defense_phrase}.\n"
-        f"  • {away_team} away: {away_attack_phrase}; {away_defense_phrase}.\n"
+        f"  • {home_team} {home_ctx}: {home_attack_phrase}; {home_defense_phrase}.\n"
+        f"  • {away_team} {away_ctx}: {away_attack_phrase}; {away_defense_phrase}.\n"
         f"  • Expected goals come from multiplying each team's scoring rate by the opponent's conceding rate, "
-        f"relative to the league's average home/away goal totals. Scorelines, over/under, and BTTS are all "
+        f"relative to the league's average goal totals. Scorelines, over/under, and BTTS are all "
         f"derived from that same expected-goals estimate.\n"
+        f"\n"
+        f"  📊 **Statistically Strongest Tip:** {tip_label} — model probability **{tip_prob*100:.1f}%** "
+        f"(fair odds {tip_fair:.2f}). This is the highest-probability outcome the model supports for this match; "
+        f"it's still a probability, not a certainty — only worth backing if a sportsbook prices it above {tip_fair:.2f}.\n"
         f"  _Poisson model from each team's actual goals scored/conceded.{sample_note} Statistical estimate, not a guaranteed outcome._"
     )
 
@@ -308,6 +339,6 @@ def scan_competition(competition_code, competition_name):
         if not probs:
             continue
         kickoff = m.get("utcDate", "TBD")
-        msg = format_match_probabilities(competition_name, home_team, away_team, probs, kickoff, sample_note)
+        msg = format_match_probabilities(competition_name, home_team, away_team, probs, kickoff, sample_note, neutral=national)
         results.append((probs, msg, kickoff, m["id"]))
     return results
