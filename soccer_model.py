@@ -248,9 +248,13 @@ def _rating_phrase(value, kind):
         return "concedes about league-average"
 
 
-def strongest_tip(probs, home_team, away_team):
-    """The single market outcome the model assigns the highest probability — i.e. the most
-    statistically supported bet for this match. Returns (label, probability, fair_odds)."""
+MIN_TIP_ODDS = 1.5  # only suggest a tip that pays at least this (i.e. model probability <= 1/1.5 = 66.7%)
+
+
+def strongest_tip(probs, home_team, away_team, min_odds=MIN_TIP_ODDS):
+    """The highest-probability market outcome that is still priced at >= min_odds — i.e. the
+    safest bet the model supports that nonetheless pays a meaningful return (avoids suggesting
+    near-locks like 'Over 1.5 goals @ 1.07'). Returns (label, probability, fair_odds)."""
     hw, dr, aw = probs["home_win"], probs["draw"], probs["away_win"]
     candidates = [
         (f"{home_team} to win", hw),
@@ -266,7 +270,13 @@ def strongest_tip(probs, home_team, away_team):
         candidates.append((f"Over {line} goals", d["over"]))
         candidates.append((f"Under {line} goals", d["under"]))
 
-    label, p = max(candidates, key=lambda c: c[1])
+    prob_cap = 1.0 / min_odds
+    qualifying = [(label, p) for label, p in candidates if 0 < p <= prob_cap]
+    # There is always at least one outcome below the cap (the weaker side of the 1X2 trio),
+    # but fall back to the full set just in case so we always return something.
+    pool = qualifying or candidates
+
+    label, p = max(pool, key=lambda c: c[1])
     fair = (1.0 / p) if p > 0 else float("inf")
     return label, p, fair
 
@@ -309,8 +319,8 @@ def format_match_probabilities(competition_name, home_team, away_team, probs, ki
         f"derived from that same expected-goals estimate.\n"
         f"\n"
         f"  📊 **Statistically Strongest Tip:** {tip_label} — model probability **{tip_prob*100:.1f}%** "
-        f"(fair odds {tip_fair:.2f}). This is the highest-probability outcome the model supports for this match; "
-        f"it's still a probability, not a certainty — only worth backing if a sportsbook prices it above {tip_fair:.2f}.\n"
+        f"(fair odds {tip_fair:.2f}). This is the highest-probability outcome the model supports that still pays "
+        f"at least 1.50; it's a probability, not a certainty — only worth backing if a sportsbook prices it above {tip_fair:.2f}.\n"
         f"  _Poisson model from each team's actual goals scored/conceded.{sample_note} Statistical estimate, not a guaranteed outcome._"
     )
 
