@@ -17,6 +17,7 @@ HIT_HISTORY_WEBHOOK = os.environ.get("HIT_HISTORY_WEBHOOK")  # optional; results
 DAILY_LOCK_WEBHOOK = os.environ.get("DAILY_LOCK_WEBHOOK")    # free daily teaser pick
 PARLAY_WEBHOOK = os.environ.get("PARLAY_WEBHOOK")            # gold daily parlay
 BANKROLL_WEBHOOK = os.environ.get("BANKROLL_WEBHOOK")        # gold low-variance picks
+WIN_RATE_WEBHOOK = os.environ.get("WIN_RATE_WEBHOOK")        # daily performance summary
 
 PREMIUM_THRESHOLD = 0.55  # top outcome >= this is flagged a Gold "premium play"
 
@@ -422,6 +423,29 @@ def run_daily_specials():
             "description": "\n".join(lines) +
                            "\n\n_Higher-probability, lower-variance singles for steady growth. Flat stakes recommended._",
             "footer": {"text": "Statistical estimate, not a guaranteed outcome — bet responsibly."},
+        })
+
+    # Daily performance summary to #win-rate-tracker (honest running record).
+    if WIN_RATE_WEBHOOK:
+        s = RESULTS_STATE
+        wk_n = s.get("week_wins", 0) + s.get("week_losses", 0)
+        at_n = s.get("all_wins", 0) + s.get("all_losses", 0)
+        wk_hr = (s.get("week_wins", 0) / wk_n * 100) if wk_n else 0.0
+        at_hr = (s.get("all_wins", 0) / at_n * 100) if at_n else 0.0
+        wk_p, at_p = s.get("weekly", 0.0), s.get("all_time", 0.0)
+        post_to_discord(WIN_RATE_WEBHOOK, embed={
+            "title": "📊 Performance Tracker",
+            "color": 0x2ECC71 if at_p >= 0 else 0xE74C3C,
+            "description": f"_Updated {today}_",
+            "fields": [
+                {"name": "📅 This week",
+                 "value": f"**{s.get('week_wins',0)}W – {s.get('week_losses',0)}L**  ({wk_hr:.0f}% hit)\n"
+                          f"Profit: **{'+' if wk_p>=0 else ''}{wk_p:.2f}%**", "inline": True},
+                {"name": "📈 All-time",
+                 "value": f"**{s.get('all_wins',0)}W – {s.get('all_losses',0)}L**  ({at_hr:.0f}% hit)\n"
+                          f"Profit: **{'+' if at_p>=0 else ''}{at_p:.2f}%**", "inline": True},
+            ],
+            "footer": {"text": "Flat 1% stakes at the model's fair odds. Settled on 90-minute results. Details in #tip-history."},
         })
 
     RESULTS_STATE["daily_specials_date"] = today
