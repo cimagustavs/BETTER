@@ -641,12 +641,20 @@ def embed_for(match, include_tip=True, premium=False):
 
 
 def get_match_result(competition_code, match_id):
-    """Return (home_goals, away_goals) for a finished match, or None if not finished/found."""
+    """Return (home_goals, away_goals) for a finished match, settled on REGULAR TIME (90').
+    Football-data's `fullTime` includes extra time and penalty shootouts for knockout games, but
+    betting markets settle on the 90-minute score — so for any match that went to ET/penalties we
+    use `regularTime` instead. Returns None if not finished/found."""
     finished = get_finished_matches(competition_code)
     for m in finished:
         if m["id"] == match_id:
-            ft = m.get("score", {}).get("fullTime", {})
-            hg, ag = ft.get("home"), ft.get("away")
+            score = m.get("score", {})
+            if score.get("duration") in ("EXTRA_TIME", "PENALTY_SHOOTOUT") and score.get("regularTime"):
+                rt = score["regularTime"]
+                hg, ag = rt.get("home"), rt.get("away")
+            else:
+                ft = score.get("fullTime", {})
+                hg, ag = ft.get("home"), ft.get("away")
             if hg is not None and ag is not None:
                 return hg, ag
     return None

@@ -32,8 +32,12 @@ COMPETITION_WEBHOOKS = {
     if os.environ.get(f"COMP_{code}_WEBHOOK")
 }
 
-# Map the-odds-api soccer keys <-> football-data competition codes used by the results tracker.
-RESULTS_STATE = results.load_state()
+# Results tracker state. Set RESET_STATE=1 once (then remove it) to wipe a bad/test tally.
+if os.environ.get("RESET_STATE"):
+    RESULTS_STATE = results.reset_state()
+    print("[results] RESET_STATE set — tally wiped to zero.")
+else:
+    RESULTS_STATE = results.load_state()
 
 SPORTS = [
     "soccer_epl",

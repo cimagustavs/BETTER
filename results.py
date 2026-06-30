@@ -43,6 +43,13 @@ def load_state():
         return _default_state()
 
 
+def reset_state():
+    """Wipe all tracked results back to zero and persist. Used to clear bad/test data."""
+    state = _default_state()
+    save_state(state)
+    return state
+
+
 def save_state(state):
     try:
         os.makedirs(STATE_DIR, exist_ok=True)
