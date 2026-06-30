@@ -457,10 +457,13 @@ def main():
         threading.Thread(target=betting_loop, daemon=True).start()
         try:
             import invite_tracker
-            invite_tracker.run_invite_bot(bot_token)
+            invite_tracker.run_invite_bot(bot_token)  # blocks while connected
         except Exception as e:
-            print(f"[invites] tracker failed to start ({e}); betting poller continues.")
-            betting_loop()  # fall back to foreground poller so the service stays up
+            # The betting poller is already running in the daemon thread — do NOT start a second
+            # one. Just keep the main thread alive so the daemon thread keeps going.
+            print(f"[invites] tracker not running ({e}); betting poller continues in background.")
+            while True:
+                time.sleep(3600)
     else:
         betting_loop()
 
