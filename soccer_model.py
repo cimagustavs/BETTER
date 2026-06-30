@@ -540,13 +540,19 @@ def format_match_embed(competition_name, home_team, away_team, probs, kickoff,
     )
     scores_field = "\n".join(f"`{hg}-{ag}`  {p*100:.1f}%" for (hg, ag), p in probs["top_scorelines"])
 
-    why_field = (
-        f"_Sample: {home_team} {probs['home_games']} games, {away_team} {probs['away_games']} games_\n"
-        f"• **{home_team}** {home_ctx}: {_rating_phrase(probs['home_attack'],'attack')}; "
-        f"{_rating_phrase(probs['home_defense'],'defense')}.\n"
-        f"• **{away_team}** {away_ctx}: {_rating_phrase(probs['away_attack'],'attack')}; "
-        f"{_rating_phrase(probs['away_defense'],'defense')}."
-    )
+    if include_tip:
+        why_field = (
+            f"_Sample: {home_team} {probs['home_games']} games, {away_team} {probs['away_games']} games_\n"
+            f"• **{home_team}** {home_ctx}: {_rating_phrase(probs['home_attack'],'attack')}; "
+            f"{_rating_phrase(probs['home_defense'],'defense')}.\n"
+            f"• **{away_team}** {away_ctx}: {_rating_phrase(probs['away_attack'],'attack')}; "
+            f"{_rating_phrase(probs['away_defense'],'defense')}."
+        )
+    else:
+        why_field = (
+            "🔒 **VIP only** — the model's full reasoning (each team's attack/defense form and "
+            "how the projection is built) is reserved for **Silver** and **Gold** members."
+        )
     if include_tip:
         tip_field = (
             f"➡️ **{tip_label}**\n"
