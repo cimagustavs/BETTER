@@ -428,7 +428,7 @@ def run_daily_specials():
     results.save_state(RESULTS_STATE)
 
 
-def main():
+def betting_loop():
     print(f"Signal bot starting at {datetime.now(timezone.utc).isoformat()}")
     while True:
         try:
@@ -443,6 +443,26 @@ def main():
         if len(posted_soccer_matches) > 5000:
             posted_soccer_matches.clear()
         time.sleep(SCAN_INTERVAL_SECONDS)
+
+
+def main():
+    # The betting poller runs in a background thread. If the invite tracker is configured
+    # (bot token + guild + reward role), run its gateway connection in the main thread;
+    # otherwise just run the poller in the foreground.
+    bot_token = os.environ.get("DISCORD_BOT_TOKEN")
+    invites_configured = bot_token and os.environ.get("GUILD_ID") and os.environ.get("INVITE_REWARD_ROLE_ID")
+
+    if invites_configured:
+        import threading
+        threading.Thread(target=betting_loop, daemon=True).start()
+        try:
+            import invite_tracker
+            invite_tracker.run_invite_bot(bot_token)
+        except Exception as e:
+            print(f"[invites] tracker failed to start ({e}); betting poller continues.")
+            betting_loop()  # fall back to foreground poller so the service stays up
+    else:
+        betting_loop()
 
 
 if __name__ == "__main__":
