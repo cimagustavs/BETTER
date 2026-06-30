@@ -29,6 +29,7 @@ def _default_state():
         "weekly": 0.0,
         "week_wins": 0,
         "week_losses": 0,
+        "win_rate_msg_id": None,  # id of the current #win-rate-tracker board, so it can be replaced
     }
 
 

@@ -340,6 +340,7 @@ def run_settlement_scan():
         # keep the settled list from growing unbounded
         RESULTS_STATE["settled"] = RESULTS_STATE["settled"][-2000:]
         results.save_state(RESULTS_STATE)
+        update_win_rate_board()  # refresh the standings on every settlement
 
 
 def _gather_upcoming(hours_ahead=30):
@@ -425,31 +426,53 @@ def run_daily_specials():
             "footer": {"text": "Statistical estimate, not a guaranteed outcome — bet responsibly."},
         })
 
-    # Daily performance summary to #win-rate-tracker (honest running record).
-    if WIN_RATE_WEBHOOK:
-        s = RESULTS_STATE
-        wk_n = s.get("week_wins", 0) + s.get("week_losses", 0)
-        at_n = s.get("all_wins", 0) + s.get("all_losses", 0)
-        wk_hr = (s.get("week_wins", 0) / wk_n * 100) if wk_n else 0.0
-        at_hr = (s.get("all_wins", 0) / at_n * 100) if at_n else 0.0
-        wk_p, at_p = s.get("weekly", 0.0), s.get("all_time", 0.0)
-        post_to_discord(WIN_RATE_WEBHOOK, embed={
-            "title": "📊 Performance Tracker",
-            "color": 0x2ECC71 if at_p >= 0 else 0xE74C3C,
-            "description": f"_Updated {today}_",
-            "fields": [
-                {"name": "📅 This week",
-                 "value": f"**{s.get('week_wins',0)}W – {s.get('week_losses',0)}L**  ({wk_hr:.0f}% hit)\n"
-                          f"Profit: **{'+' if wk_p>=0 else ''}{wk_p:.2f}%**", "inline": True},
-                {"name": "📈 All-time",
-                 "value": f"**{s.get('all_wins',0)}W – {s.get('all_losses',0)}L**  ({at_hr:.0f}% hit)\n"
-                          f"Profit: **{'+' if at_p>=0 else ''}{at_p:.2f}%**", "inline": True},
-            ],
-            "footer": {"text": "Flat 1% stakes at the model's fair odds. Settled on 90-minute results. Details in #tip-history."},
-        })
+    update_win_rate_board()  # refresh the daily standings too
 
     RESULTS_STATE["daily_specials_date"] = today
     results.save_state(RESULTS_STATE)
+
+
+def _win_rate_embed():
+    s = RESULTS_STATE
+    wk_n = s.get("week_wins", 0) + s.get("week_losses", 0)
+    at_n = s.get("all_wins", 0) + s.get("all_losses", 0)
+    wk_hr = (s.get("week_wins", 0) / wk_n * 100) if wk_n else 0.0
+    at_hr = (s.get("all_wins", 0) / at_n * 100) if at_n else 0.0
+    wk_p, at_p = s.get("weekly", 0.0), s.get("all_time", 0.0)
+    return {
+        "title": "📊 Performance Tracker",
+        "color": 0x2ECC71 if at_p >= 0 else (0xE74C3C if at_n else 0x95A5A6),
+        "description": "Live, honest record of every Statistically Strongest Tip — wins *and* losses.",
+        "fields": [
+            {"name": "📅 This week",
+             "value": f"**{s.get('week_wins',0)}W – {s.get('week_losses',0)}L**  ({wk_hr:.0f}% hit)\n"
+                      f"Profit: **{'+' if wk_p>=0 else ''}{wk_p:.2f}%**", "inline": True},
+            {"name": "📈 All-time",
+             "value": f"**{s.get('all_wins',0)}W – {s.get('all_losses',0)}L**  ({at_hr:.0f}% hit)\n"
+                      f"Profit: **{'+' if at_p>=0 else ''}{at_p:.2f}%**", "inline": True},
+        ],
+        "footer": {"text": "Flat 1% stakes at the model's fair odds. Settled on 90-minute results. Details in #tip-history."},
+    }
+
+
+def update_win_rate_board():
+    """Rebuild the single performance board in #win-rate-tracker: delete the previous one and
+    post a fresh one reflecting the current tally. Keeps exactly one always-current board."""
+    if not WIN_RATE_WEBHOOK:
+        return
+    prev = RESULTS_STATE.get("win_rate_msg_id")
+    if prev:
+        try:
+            requests.delete(f"{WIN_RATE_WEBHOOK}/messages/{prev}", timeout=10)
+        except requests.RequestException:
+            pass
+    try:
+        r = requests.post(f"{WIN_RATE_WEBHOOK}?wait=true", json={"embeds": [_win_rate_embed()]}, timeout=10)
+        if r.status_code == 200:
+            RESULTS_STATE["win_rate_msg_id"] = r.json().get("id")
+            results.save_state(RESULTS_STATE)
+    except requests.RequestException:
+        pass
 
 
 def betting_loop():
@@ -470,6 +493,7 @@ def betting_loop():
 
 
 def main():
+    update_win_rate_board()  # post the current standings immediately on startup
     # The betting poller runs in a background thread. If the invite tracker is configured
     # (bot token + guild + reward role), run its gateway connection in the main thread;
     # otherwise just run the poller in the foreground.
