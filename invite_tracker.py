@@ -94,21 +94,31 @@ def run_invite_bot(token):
         key = str(inviter.id)
         counts[key] = counts.get(key, 0) + 1
         _save_counts(counts)
+        n = counts[key]
 
-        if counts[key] >= INVITE_THRESHOLD:
-            role = member.guild.get_role(INVITE_REWARD_ROLE_ID)
+        role = member.guild.get_role(INVITE_REWARD_ROLE_ID)
+        role_name = role.name if role else "the reward role"
+        log_ch = member.guild.get_channel(int(ANNOUNCE_CHANNEL_ID)) if ANNOUNCE_CHANNEL_ID else None
+
+        # Live progress log on every attributed join.
+        if log_ch:
+            await log_ch.send(
+                f"🔗 {member.mention} joined — invited by **{inviter.display_name}** "
+                f"(**{n}/{INVITE_THRESHOLD}** toward {role_name})"
+            )
+
+        # Reward once they reach the threshold.
+        if n >= INVITE_THRESHOLD and role:
             inviter_member = member.guild.get_member(inviter.id)
-            if role and inviter_member and role not in inviter_member.roles:
+            if inviter_member and role not in inviter_member.roles:
                 try:
                     await inviter_member.add_roles(role, reason=f"Reached {INVITE_THRESHOLD} invites")
-                    print(f"[invites] granted reward role to {inviter} ({counts[key]} invites)")
-                    if ANNOUNCE_CHANNEL_ID:
-                        ch = member.guild.get_channel(int(ANNOUNCE_CHANNEL_ID))
-                        if ch:
-                            await ch.send(
-                                f"🎉 {inviter.mention} just hit **{INVITE_THRESHOLD} invites** "
-                                f"and unlocked **{role.name}**! Invite friends to earn it too."
-                            )
+                    print(f"[invites] granted reward role to {inviter} ({n} invites)")
+                    if log_ch:
+                        await log_ch.send(
+                            f"🎉 {inviter.mention} just hit **{INVITE_THRESHOLD} invites** "
+                            f"and unlocked **{role.name}**! Invite friends to earn it too."
+                        )
                 except discord.Forbidden:
                     print("[invites] missing permission / role hierarchy to assign reward role")
 
